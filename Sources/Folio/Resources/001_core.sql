@@ -2,10 +2,9 @@ CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
   display_name TEXT,
   file_path TEXT,
-  course_code TEXT,
   pages INTEGER,
   chunks INTEGER,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  imported_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS doc_chunks (
