@@ -28,7 +28,7 @@ internal struct DocChunkStore {
     let dbQueue: DatabaseQueue
     init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
 
-    func insert(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil) throws {
+    func insert(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil, ftsContent: String? = nil) throws {
         try dbQueue.write { db in
             let id = UUID().uuidString
             try db.execute(sql: """
@@ -38,9 +38,11 @@ internal struct DocChunkStore {
 
             try db.execute(sql: """
               INSERT INTO doc_chunks_fts(rowid, content, source_id, section_title)
-              SELECT rowid, content, source_id, section_title
-              FROM doc_chunks WHERE id = ?
-            """, arguments: [id])
+              VALUES (
+                (SELECT rowid FROM doc_chunks WHERE id = ?),
+                ?, ?, ?
+              )
+            """, arguments: [id, ftsContent ?? content, sourceId, sectionTitle])
         }
     }
 

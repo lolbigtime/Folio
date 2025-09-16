@@ -7,8 +7,17 @@
 
 import Foundation
 
+
+public struct IndexingConfig: Sendable {
+    public var useContextualPrefix = true
+    public var contextFn: (@Sendable (_ doc: LoadedDocument, _ page: LoadedPage, _ chunk: String) -> String)? = nil
+
+    public init() {}
+}
+
 public struct FolioConfig {
     public var chunking = ChunkingConfig()
+    public var indexing = IndexingConfig()
     public init() {}
 }
 
@@ -66,9 +75,17 @@ public final class FolioEngine {
 
         let pieces = try chunker.chunk(sourceId: sourceId, doc: cleaned, config: config.chunking)
 
+        
         var inserted = 0
         for c in pieces {
-            try store.insert(sourceId: c.sourceId, page: c.page, content: c.text)
+            
+            let pg = c.page.flatMap { idx in cleaned.pages.first { $0.index == idx } } ?? cleaned.pages.first!
+            let prefix = config.indexing.useContextualPrefix ? Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text) : ""
+            
+            let augmented = prefix + c.text
+            
+            try store.insert(sourceId: c.sourceId, page: c.page, content: c.text, sectionTitle: prefix, ftsContent: augmented)
+            
             inserted += 1
         }
 
