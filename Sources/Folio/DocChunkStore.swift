@@ -24,11 +24,11 @@ public struct Source: Equatable, Hashable, Codable {
     public let importedAt: String
 }
 
-public struct DocChunkStore {
+internal struct DocChunkStore {
     let dbQueue: DatabaseQueue
-    public init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
+    init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
 
-    public func insert(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil) throws {
+    func insert(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil) throws {
         try dbQueue.write { db in
             let id = UUID().uuidString
             try db.execute(sql: """
@@ -44,29 +44,39 @@ public struct DocChunkStore {
         }
     }
 
-    public func ftsSnippets(query: String, inSource source: String? = nil, limit: Int = 10) throws -> [Snippet] {
+    func ftsSnippets(query: String, inSource source: String? = nil, limit: Int = 10) throws -> [Snippet] {
         try dbQueue.read { db in
-            var whereSQL = "f MATCH ?"
+            var sql = """
+                SELECT d.source_id, d.page, snippet(doc_chunks_fts, 0, '', '', '…', 18) AS excerpt, bm25(doc_chunks_fts) AS score
+                FROM doc_chunks AS d
+                JOIN doc_chunks_fts ON doc_chunks_fts.rowid = d.rowid
+                WHERE doc_chunks_fts MATCH ?
+            """
             var args: [DatabaseValueConvertible] = [query]
+
             if let s = source {
-                whereSQL += " AND (d.source_id = ? OR d.source_id LIKE ?)"
+                sql += " AND (d.source_id = ? OR d.source_id LIKE ?)"
                 args.append(contentsOf: [s, "\(s) p.%"])
             }
-            let rows = try Row.fetchAll(db, sql: """
-              SELECT d.source_id, d.page,
-                     snippet(doc_chunks_fts, 0, '', '', '…', 18) AS excerpt,
-                     bm25(f) AS score
-              FROM doc_chunks AS d
-              JOIN doc_chunks_fts AS f ON f.rowid = d.rowid
-              WHERE \(whereSQL)
-              ORDER BY score
-              LIMIT ?
-            """, arguments: StatementArguments(args + [limit]))
-            return rows.map { Snippet(sourceId: $0["source_id"], page: $0["page"], excerpt: $0["excerpt"], score: $0["score"]) }
+
+            sql += " ORDER BY score LIMIT ?"
+            args.append(limit)
+
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            
+            return rows.map {
+                Snippet(
+                    sourceId: $0["source_id"],
+                    page: $0["page"],
+                    excerpt: $0["excerpt"],
+                    score: $0["score"]
+                )
+            }
         }
     }
 
-    public func upsertSource(id: String, filePath: String, displayName: String, pages: Int?, chunks: Int) throws {
+
+    func upsertSource(id: String, filePath: String, displayName: String, pages: Int?, chunks: Int) throws {
         try dbQueue.write { db in
             try db.execute(sql: """
               INSERT INTO sources (id, file_path, display_name, pages, chunks, imported_at)
@@ -81,7 +91,7 @@ public struct DocChunkStore {
         }
     }
 
-    public func listSources() throws -> [Source] {
+    func listSources() throws -> [Source] {
         try dbQueue.read { db in
             try Row.fetchAll(db, sql: """
               SELECT id, file_path, display_name, pages, chunks,
@@ -96,14 +106,14 @@ public struct DocChunkStore {
         }
     }
 
-    public func deleteChunks(forSourceId base: String) throws {
+    func deleteChunks(forSourceId base: String) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM doc_chunks WHERE source_id = ? OR source_id LIKE ?", arguments: [base, "\(base) p.%"])
             try db.execute(sql: "INSERT INTO doc_chunks_fts(doc_chunks_fts) VALUES('rebuild')")
         }
     }
 
-    public func deleteSource(id base: String) throws {
+    func deleteSource(id base: String) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM doc_chunks WHERE source_id LIKE ?", arguments: ["\(base) p.%"])
             try db.execute(sql: "DELETE FROM sources WHERE id = ?", arguments: [base])

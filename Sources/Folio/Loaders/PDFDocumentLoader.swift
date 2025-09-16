@@ -11,9 +11,9 @@ import PDFKit
 import Vision
 #endif
 
-public struct PDFDocumentLoader: DocumentLoader {
-    public init() {}
-    public func load(_ input: IngestInput) throws -> LoadedDocument {
+internal struct PDFDocumentLoader: DocumentLoader {
+    init() {}
+    func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .pdf(url) = input, let doc = PDFDocument(url: url) else {
             throw NSError(domain: "Folio", code: 401, userInfo: [NSLocalizedDescriptionKey: "PDF open failed"])
         }
@@ -37,9 +37,9 @@ public struct PDFDocumentLoader: DocumentLoader {
     }
 }
 
-public struct TextDocumentLoader: DocumentLoader {
-    public init() {}
-    public func load(_ input: IngestInput) throws -> LoadedDocument {
+internal struct TextDocumentLoader: DocumentLoader {
+    init() {}
+    func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .text(s, name) = input else {
             throw NSError(domain: "Folio", code: 402, userInfo: [NSLocalizedDescriptionKey: "Not text"])
         }
@@ -48,6 +48,5 @@ public struct TextDocumentLoader: DocumentLoader {
 }
 
 private func normalize(_ s: String) -> String {
-    s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-     .trimmingCharacters(in: .whitespacesAndNewlines)
+    s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
 }

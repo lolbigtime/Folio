@@ -8,11 +8,11 @@
 import Foundation
 import GRDB
 
-public struct AppDatabase {
+internal struct AppDatabase {
     
-    public let dbQueue: DatabaseQueue
+    internal let dbQueue: DatabaseQueue
     
-    public init(path: String) throws {
+    internal init(path: String) throws {
         dbQueue = try DatabaseQueue(path: path)
         try migrate()
     }

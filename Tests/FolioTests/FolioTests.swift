@@ -1,6 +1,12 @@
-import Testing
+// Tests/FolioTests/FolioSmokeTests.swift
+import XCTest
 @testable import Folio
 
-@Test func example() async throws {
-    // Write your test here and use APIs like `#expect(...)` to check expected conditions.
+final class FolioSmokeTests: XCTestCase {
+    func testTextIngestAndSearch() throws {
+        let folio = try FolioEngine.inMemory()
+        _ = try folio.ingest(.text("hello world from folio", name: "note.txt"), sourceId: "T1")
+        let hits = try folio.search("hello", in: "T1", limit: 1)
+        XCTAssertFalse(hits.isEmpty)
+    }
 }

@@ -18,23 +18,33 @@ public final class FolioEngine {
     private let loaders: [DocumentLoader]
     private let chunker: Chunker
     
-    public convenience init(loaders: [DocumentLoader] = [PDFDocumentLoader(), TextDocumentLoader()], chunker: Chunker = UniversalChunker()) throws {
+    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
-        try self.init(databaseURL: url, loaders: loaders, chunker: chunker)
+        let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
+        let useChunker = chunker ?? UniversalChunker()
+        
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker)
     }
     
-    public convenience init(appGroup identifier: String, loaders: [DocumentLoader] = [PDFDocumentLoader(), TextDocumentLoader()], chunker: Chunker = UniversalChunker()) throws {
+    
+    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws {
         let url = try FolioEngine.appGroupDatabaseURL(identifier: identifier)
-        try self.init(databaseURL: url, loaders: loaders, chunker: chunker)
+        let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
+        let useChunker = chunker ?? UniversalChunker()
+        
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker)
     }
     
-    public static func inMemory(loaders: [DocumentLoader] = [PDFDocumentLoader(), TextDocumentLoader()], chunker: Chunker = UniversalChunker()) throws -> FolioEngine {
-        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: loaders, chunker: chunker)
+    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws -> FolioEngine {
+        let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
+        let useChunker = chunker ?? UniversalChunker()
+        
+        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker)
     }
     
     public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker) throws {
-        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        
         self.db = try AppDatabase(path: databaseURL.path)
         self.store = DocChunkStore(dbQueue: db.dbQueue)
         self.loaders = loaders
@@ -47,17 +57,23 @@ public final class FolioEngine {
         guard let loader = loaders.first(where: { canLoad($0, input: input) }) else {
             throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
         }
+        
         let doc = try loader.load(input)
-        try? store.deleteChunks(forSourceId: sourceId)
+        let cleaned = HeaderFooterFilter.strip(doc)
 
-        let chunks = try chunker.chunk(sourceId: sourceId, doc: doc, config: config.chunking)
+        try? store.deleteChunks(forSourceId: sourceId)
+        try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: 0)
+
+        let pieces = try chunker.chunk(sourceId: sourceId, doc: cleaned, config: config.chunking)
+
         var inserted = 0
-        for c in chunks {
+        for c in pieces {
             try store.insert(sourceId: c.sourceId, page: c.page, content: c.text)
             inserted += 1
         }
 
         try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: inserted)
+
         return (doc.pages.count, inserted)
     }
 
@@ -82,7 +98,7 @@ public final class FolioEngine {
         }
     }
     
-    private static func defaultDatabaseURL() throws -> URL {
+    internal static func defaultDatabaseURL() throws -> URL {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = base.appendingPathComponent("Folio", isDirectory: true)
@@ -91,7 +107,7 @@ public final class FolioEngine {
         return dir.appendingPathComponent("folio.sqlite")
     }
 
-    private static func appGroupDatabaseURL(identifier: String) throws -> URL {
+    internal static func appGroupDatabaseURL(identifier: String) throws -> URL {
         let fm = FileManager.default
         
         guard let container = fm.containerURL(forSecurityApplicationGroupIdentifier: identifier) else {
