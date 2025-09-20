@@ -10,7 +10,7 @@ import Foundation
 
 public struct IndexingConfig: Sendable {
     public var useContextualPrefix = true
-    public var contextFn: (@Sendable (_ doc: LoadedDocument, _ page: LoadedPage, _ chunk: String) -> String)? = nil
+    public var contextFn: (@Sendable (_ doc: LoadedDocument, _ page: LoadedPage, _ chunk: String) async throws -> String)? = nil
 
     public init() {}
 }
@@ -93,6 +93,46 @@ public final class FolioEngine {
 
         return (doc.pages.count, inserted)
     }
+    
+    
+    @discardableResult
+    public func ingestAsync(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) async throws -> (pages: Int, chunks: Int) {
+        
+        guard let loader = loaders.first(where: { canLoad($0, input: input) }) else {
+            throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
+        }
+        
+        let doc = try loader.load(input)
+        let cleaned = HeaderFooterFilter.strip(doc)
+        
+        try? store.deleteChunks(forSourceId: sourceId)
+        try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: 0)
+
+        let pieces = try chunker.chunk(sourceId: sourceId, doc: cleaned, config: config.chunking)
+        var inserted = 0
+        
+        for c in pieces {
+            let pg = c.page.flatMap { idx in cleaned.pages.first { $0.index == idx } } ?? cleaned.pages.first!
+            let prefix: String
+            
+            if config.indexing.useContextualPrefix {
+                if let f = config.indexing.contextFn {
+                    prefix = (try? await f(cleaned, pg, c.text)) ?? Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text)
+                } else {
+                    prefix = Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text)
+                }
+            } else {
+                prefix = ""
+            }
+            let augmented = prefix + c.text
+
+            try store.insert(sourceId: c.sourceId, page: c.page, content: c.text, sectionTitle: prefix, ftsContent: augmented)
+            inserted += 1
+        }
+
+        try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: inserted)
+        return (doc.pages.count, inserted)
+}
 
     
     public func search(_ query: String, in sourceId: String? = nil, limit: Int = 10) throws -> [Snippet] {
