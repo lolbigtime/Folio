@@ -7,6 +7,7 @@
 
 import Foundation
 import GRDB
+import CryptoKit
 
 public struct Snippet: Codable, Hashable, Sendable {
     public let sourceId: String
@@ -23,6 +24,117 @@ public struct Source: Equatable, Hashable, Codable {
     public let chunks: Int
     public let importedAt: String
 }
+
+extension DocChunkStore {
+    
+    public struct SnippetHit: Sendable, Hashable {
+        public let rowid: Int64
+        public let sourceId: String
+        public let page: Int?
+        public let excerpt: String
+        public let bm25: Double
+    }
+
+    public struct NeighborChunk: Sendable {
+        public let rowid: Int64
+        public let text: String
+        public let page: Int?
+    }
+    
+    func cacheKey(sourceId: String, page: Int?, chunk:String) -> String {
+        let base = "\(sourceId)|\(page ?? -1)|\(chunk)"
+        let d = SHA256.hash(data: Data(base.utf8))
+        return d.map { String(format: "%02x", $0) }.joined()
+    }
+    
+    func getCachedPrefix(for key: String) throws -> String? {
+        try dbQueue.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM prefix_cache WHERE key = ?", arguments: [key])
+        }
+    }
+    
+    func putCachedPrefix(key: String, value: String, metaJSON: String) throws {
+        try dbQueue.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO prefix_cache(key, value, meta)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, meta=excluded.meta
+                """,
+                arguments: [key, value, metaJSON]
+            )
+        }
+    }
+    
+    func ftsHits(query: String, inSource source: String? = nil, limit: Int = 10) throws -> [SnippetHit] {
+        try dbQueue.read { db in
+            var sql = """
+            SELECT
+              d.rowid AS rowid,
+              d.source_id AS source_id,
+              d.page AS page,
+              REPLACE(
+                snippet(doc_chunks_fts, 0, '', '', '…', 18),
+                COALESCE(d.section_title || ' ', ''),
+                ''
+              ) AS excerpt,
+              bm25(doc_chunks_fts) AS score
+            FROM doc_chunks AS d
+            JOIN doc_chunks_fts ON doc_chunks_fts.rowid = d.rowid
+            WHERE doc_chunks_fts MATCH ?
+            """
+            var args: [DatabaseValueConvertible] = [query]
+
+            if let s = source {
+                sql += " AND d.source_id = ?"
+                args.append(s)
+            }
+
+            sql += " ORDER BY score LIMIT ?"
+            args.append(limit)
+
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            return rows.map {
+                SnippetHit(
+                    rowid: $0["rowid"],
+                    sourceId: $0["source_id"],
+                    page: $0["page"],
+                    excerpt: $0["excerpt"],
+                    bm25: $0["score"]
+                )
+            }
+        }
+    }
+    
+    func fetchNeighbors(sourceId: String, around rowid: Int64, expand: Int) throws -> [NeighborChunk] {
+        try dbQueue.read { db in
+            let prevRows = try Row.fetchAll(db, sql: """
+                SELECT rowid, content, page
+                FROM doc_chunks
+                WHERE source_id = ? AND rowid < ?
+                ORDER BY rowid DESC
+                LIMIT ?
+            """, arguments: [sourceId, rowid, expand]).reversed()
+
+            let nextRows = try Row.fetchAll(db, sql: """
+                SELECT rowid, content, page
+                FROM doc_chunks
+                WHERE source_id = ? AND rowid >= ?
+                ORDER BY rowid ASC
+                LIMIT ?
+            """, arguments: [sourceId, rowid, expand + 1])
+
+            let toChunk: (Row) -> NeighborChunk = { r in
+                NeighborChunk(rowid: r["rowid"], text: r["content"], page: r["page"])
+            }
+            return prevRows.map(toChunk) + nextRows.map(toChunk)
+        }
+    }
+    
+    
+    
+}
+
 
 internal struct DocChunkStore {
     let dbQueue: DatabaseQueue

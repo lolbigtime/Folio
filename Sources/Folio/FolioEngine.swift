@@ -21,6 +21,15 @@ public struct FolioConfig {
     public init() {}
 }
 
+public struct RetrievedPassage {
+    public let sourceId: String
+    public let startPage: Int?
+    public let excerpt: String
+    public let text: String
+    public let bm25: Double
+}
+
+
 public final class FolioEngine {
     private let db: AppDatabase
     private let store:  DocChunkStore
@@ -113,26 +122,65 @@ public final class FolioEngine {
         
         for c in pieces {
             let pg = c.page.flatMap { idx in cleaned.pages.first { $0.index == idx } } ?? cleaned.pages.first!
-            let prefix: String
-            
-            if config.indexing.useContextualPrefix {
+
+            let key = store.cacheKey(sourceId: c.sourceId, page: c.page, chunk: c.text)
+            var prefix = (try? store.getCachedPrefix(for: key)) ?? ""
+
+            if config.indexing.useContextualPrefix && prefix.isEmpty {
                 if let f = config.indexing.contextFn {
-                    prefix = (try? await f(cleaned, pg, c.text)) ?? Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text)
+                    let raw = (try? await f(cleaned, pg, c.text)) ?? Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text)
+                    
+                    var line = raw.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if line.count > 600 { line = String(line.prefix(600)) }
+                    prefix = line.isEmpty ? Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text) : line
+
+                    let meta = ["model": "user-provided", "rev": "v1", "chars": "\(prefix.count)"]
+                    let metaJSON = (try? JSONSerialization.data(withJSONObject: meta)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                    try? store.putCachedPrefix(key: key, value: prefix, metaJSON: metaJSON)
                 } else {
                     prefix = Contextualizer.prefix(doc: cleaned, page: pg, chunk: c.text)
                 }
-            } else {
+            } else if !config.indexing.useContextualPrefix {
                 prefix = ""
             }
-            let augmented = prefix + c.text
 
+            let augmented = prefix + c.text
             try store.insert(sourceId: c.sourceId, page: c.page, content: c.text, sectionTitle: prefix, ftsContent: augmented)
             inserted += 1
         }
 
         try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: inserted)
         return (doc.pages.count, inserted)
-}
+    }
+    
+    @discardableResult
+    public func searchWithContext(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage] {
+        precondition(limit > 0, "Limit needs to be greater than 0")
+        precondition(expand >= 0, "Expand must be non-negative")
+        
+        let hits = try store.ftsHits(query: query, inSource: sourceId, limit: max(limit * 6, 60))
+        
+        var results: [RetrievedPassage] = []
+        var usedRowids = Set<Int64>()
+        
+        for h in hits {
+            guard !usedRowids.contains(h.rowid) else { continue }
+            
+            let window = try store.fetchNeighbors(sourceId: h.sourceId, around: h.rowid, expand: expand)
+            guard !window.isEmpty else { continue }
+            
+            window.forEach { usedRowids.insert($0.rowid) }
+            
+            let mergedText = window.map(\.text).joined(separator: "\n\n")
+            let startPage = window.first?.page
+            
+            results.append(RetrievedPassage(sourceId: h.sourceId, startPage: startPage, excerpt: h.excerpt, text: mergedText, bm25: h.bm25))
+            if results.count >= limit { break }
+
+        }
+        
+        return results
+    }
 
     
     public func search(_ query: String, in sourceId: String? = nil, limit: Int = 10) throws -> [Snippet] {
