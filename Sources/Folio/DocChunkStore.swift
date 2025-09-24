@@ -41,6 +41,12 @@ extension DocChunkStore {
         public let page: Int?
     }
     
+    public struct VectorRow: Sendable {
+        public let rowid: Int64
+        public let dim: Int
+        public let vec: [Float]
+    }
+    
     func cacheKey(sourceId: String, page: Int?, chunk:String) -> String {
         let base = "\(sourceId)|\(page ?? -1)|\(chunk)"
         let d = SHA256.hash(data: Data(base.utf8))
@@ -131,7 +137,58 @@ extension DocChunkStore {
         }
     }
     
+    func insertReturningRowid(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil, ftsContent: String? = nil) throws -> Int64 {
+        try dbQueue.write { db in
+            let id = UUID().uuidString
+
+            try db.execute(sql: """
+              INSERT INTO doc_chunks (id, source_id, page, content, section_title)
+              VALUES (?, ?, ?, ?, ?)
+            """, arguments: [id, sourceId, page, content, sectionTitle])
+
+            try db.execute(sql: """
+              INSERT INTO doc_chunks_fts(rowid, content, source_id, section_title)
+              VALUES (
+                (SELECT rowid FROM doc_chunks WHERE id = ?),
+                ?, ?, ?
+              )
+            """, arguments: [id, ftsContent ?? content, sourceId, sectionTitle])
+
+            return try Int64.fetchOne(db,
+                sql: "SELECT rowid FROM doc_chunks WHERE id = ?",
+                arguments: [id]
+            )!
+        }
+    }
     
+    func insertVector(rowid: Int64, dim: Int, vector: [Float]) throws {
+        let data = vector.withUnsafeBufferPointer { Data(buffer: $0) }
+        try dbQueue.write { db in
+            try db.execute(sql: """
+              INSERT INTO doc_chunk_vectors(rowid, dim, vec) VALUES (?, ?, ?)
+              ON CONFLICT(rowid) DO UPDATE SET dim=excluded.dim, vec=excluded.vec
+            """, arguments: [rowid, dim, data])
+        }
+    }
+    
+    func fetchVectors(forRowids rowids: [Int64]) throws -> [VectorRow] {
+        guard !rowids.isEmpty else { return [] }
+        let placeholders = Array(repeating: "?", count: rowids.count).joined(separator: ",")
+        return try dbQueue.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT rowid, dim, vec FROM doc_chunk_vectors WHERE rowid IN (\(placeholders))",
+                arguments: StatementArguments(rowids)
+            )
+            return rows.map { r in
+                let dim: Int = r["dim"]
+                let data: Data = r["vec"]
+                var arr = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
+                _ = arr.withUnsafeMutableBytes { data.copyBytes(to: $0) }
+                return VectorRow(rowid: r["rowid"], dim: dim, vec: arr)
+            }
+        }
+    }
     
 }
 

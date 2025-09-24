@@ -29,19 +29,29 @@ public struct RetrievedPassage {
     public let bm25: Double
 }
 
+public struct RetrievedResult: Sendable {
+    public let sourceId: String
+    public let startPage: Int?
+    public let excerpt: String
+    public let text: String
+    public let bm25: Double
+    public let cosine: Double?
+    public let score: Double
+}
 
 public final class FolioEngine {
     private let db: AppDatabase
     private let store:  DocChunkStore
     private let loaders: [DocumentLoader]
     private let chunker: Chunker
+    private let embedder: Embedder?
     
     public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
         let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
         
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker)
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: nil)
     }
     
     
@@ -50,23 +60,24 @@ public final class FolioEngine {
         let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
         
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker)
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: nil)
     }
     
     public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws -> FolioEngine {
         let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
         
-        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker)
+        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embedder: nil)
     }
     
-    public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker) throws {
+    public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embedder: Embedder?) throws {
         try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         
         self.db = try AppDatabase(path: databaseURL.path)
         self.store = DocChunkStore(dbQueue: db.dbQueue)
         self.loaders = loaders
         self.chunker = chunker
+        self.embedder = embedder
     }
     
     //Ingest any supported input with caller chosen sourceID
@@ -145,8 +156,20 @@ public final class FolioEngine {
             }
 
             let augmented = prefix + c.text
-            try store.insert(sourceId: c.sourceId, page: c.page, content: c.text, sectionTitle: prefix, ftsContent: augmented)
+            let newRowId = try store.insertReturningRowid(
+                sourceId: c.sourceId,
+                page: c.page,
+                content: c.text,
+                sectionTitle: prefix,
+                ftsContent: augmented
+            )
+            
             inserted += 1
+            if let embedder {
+                let vec = try embedder.embed(augmented)
+                
+                try store.insertVector(rowid: newRowId, dim: vec.count, vector: vec)
+            }
         }
 
         try? store.upsertSource(id: sourceId, filePath: doc.name, displayName: doc.name, pages: doc.pages.count, chunks: inserted)
@@ -180,6 +203,76 @@ public final class FolioEngine {
         }
         
         return results
+    }
+    
+    public func searchHybrid(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult] {
+        precondition(limit > 0 && expand >= 0, "invalid params")
+        
+        let hits = try store.ftsHits(query: query, inSource: sourceId, limit: max(limit * 6, 60))
+        if hits.isEmpty { return [] }
+        
+        var cosByRow: [Int64: Double] = [:]
+        if let embedder {
+            let qv = try embedder.embed(query)
+            let vrows = try store.fetchVectors(forRowids: hits.map { $0.rowid })
+            
+            func cosine(_ a: [Float], _ b: [Float]) -> Double {
+                let n = min(a.count, b.count)
+                var dot = 0.0, na = 0.0, nb = 0.0
+                
+                for i in 0..<n {
+                    let x = Double(a[i]), y = Double(b[i])
+                    dot += x*y
+                    na += x*x
+                    nb += y*y
+                    
+                }
+                
+                return (na == 0 || nb == 0) ? 0.0 : dot / (sqrt(na) * sqrt(nb))
+            }
+            
+            for r in vrows {
+                cosByRow[r.rowid] = cosine(qv, r.vec)
+            }
+        }
+        
+        let allBM = hits.map(\.bm25)
+        
+        struct Cand {
+            let h: DocChunkStore.SnippetHit
+            let fused: Double
+            let cos: Double?
+        }
+        
+        let ranked = hits.map { h -> Cand in
+            let cos = cosByRow[h.rowid]
+            let fused = RankFusion.fuse(bm25: allBM, bm25: h.bm25, cosine: cos, wBM25: wBM25)
+            
+            return Cand(h: h, fused: fused, cos: cos)
+        }.sorted { $0.fused > $1.fused }
+        
+        var out: [RetrievedResult] = []
+        var used = Set<Int64>()
+        
+        for c in ranked {
+            guard !used.contains(c.h.rowid) else {
+                continue
+            }
+            
+            let window = try store.fetchNeighbors(sourceId: c.h.sourceId, around: c.h.rowid, expand: expand)
+            guard !window.isEmpty else {
+                continue
+            }
+            
+            window.forEach { used.insert($0.rowid) }
+            out.append(.init(sourceId: c.h.sourceId, startPage: window.first?.page, excerpt: c.h.excerpt, text: window.map(\.text).joined(separator: "\n\n"), bm25: c.h.bm25, cosine: c.cos, score: c.fused))
+            
+            if out.count >= limit {
+                break
+            }
+        }
+    
+        return out
     }
 
     
