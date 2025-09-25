@@ -98,17 +98,84 @@ _ = try await folio.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: cfg)
 
 ### Hybrid retrieval (BM25 + vectors + fusion + expand)
 ```swift
-// Provide an embedder (e.g., EmbeddingGemma) at init
+let gemma = EmbeddingGemmaEmbedder(
+    configuration: .init(
+        baseURL: URL(string: "https://api.groq.com")!,
+        apiKey: ProcessInfo.processInfo.environment["GROQ_API_KEY"]!,
+        model: "text-embedding-3-large"
+    )
+)
+
 let engine = try FolioEngine(
     databaseURL: dbURL,
     loaders: [PDFDocumentLoader(), TextDocumentLoader()],
     chunker: UniversalChunker(),
-    embedder: EmbeddingGemmaEmbedder(dim: 256) // your wrapper
+    embedder: gemma
 )
+
+try engine.backfillEmbeddings() // populate vectors for cosine scoring
 
 let results = try engine.searchHybrid("optimizer settings", in: "Doc1", limit: 5, expand: 1)
 for r in results {
     print("• \(r.sourceId) p.\(r.startPage ?? 0)  [bm25=\(r.bm25), cos=\(r.cosine ?? .nan), score=\(r.score)]")
+}
+```
+
+### End-to-end example (PDF + text + hybrid search + LLM answer)
+```swift
+import Folio
+import Foundation
+
+let gemma = EmbeddingGemmaEmbedder(
+    configuration: .init(
+        baseURL: URL(string: "https://api.groq.com")!,
+        apiKey: ProcessInfo.processInfo.environment["GROQ_API_KEY"]!,
+        model: "text-embedding-3-large"
+    )
+)
+
+let engine = try FolioEngine(embedder: gemma)
+
+// Ingest different document types
+try engine.ingest(.pdf(pdfURL), sourceId: "manual")
+let noteText = try String(decoding: Data(contentsOf: notesURL), as: UTF8.self)
+try engine.ingest(.text(noteText, name: "release-notes.txt"), sourceId: "notes")
+
+// Make sure every chunk has a vector before hybrid search
+try engine.backfillEmbeddings(batch: 96)
+
+let passages = try engine.searchHybrid(
+    "How do I configure streaming mode?",
+    limit: 3,
+    expand: 2
+)
+
+let context = passages
+    .map { "Source: \($0.sourceId) page \($0.startPage ?? 0)\n\($0.text)" }
+    .joined(separator: "\n\n---\n\n")
+
+let client = OpenAIStyleClient(
+    configuration: .init(
+        baseURL: URL(string: "https://api.openai.com/v1")!,
+        apiKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"]!
+    )
+)
+
+Task {
+    let answer = try await client.chatCompletion(
+        model: "gpt-4o-mini",
+        messages: [
+            .init(role: .system, content: "You are a precise technical assistant."),
+            .init(
+                role: .user,
+                content: "Using only the provided documentation, answer: How do I configure streaming mode?\n\nContext:\n\(context)"
+            )
+        ],
+        temperature: 0.2,
+        maxTokens: 256
+    ).choices.first?.message.content ?? ""
+
+    print(answer)
 }
 ```
 
@@ -147,12 +214,41 @@ public protocol Embedder: Sendable {
 ```
 
 To use **EmbeddingGemma** on device:
-1. Obtain the EmbeddingGemma model files (prefer a quantized variant).  
-2. Load them with your chosen runtime (e.g., gguf/llama.cpp‑style wrapper, Core ML if converted).  
-3. Implement `EmbeddingGemmaEmbedder: Embedder` that returns a fixed‑length `[Float]`.  
-4. Initialize `FolioEngine(..., embedder: YourEmbedder)` and ingest with `ingestAsync` so vectors are stored.
+1. Obtain credentials for an OpenAI‑style `/embeddings` endpoint (Groq, Together, Vertex, etc.) or host Gemma yourself.
+2. Initialize `EmbeddingGemmaEmbedder(configuration:)` with the endpoint URL, API key, and model name.
+3. Pass the embedder into `FolioEngine(..., embedder: gemma)` and call `backfillEmbeddings` after ingest.
+4. (Optional) Provide your own runtime by conforming to `Embedder`; Folio’s adapter shows the expected contract.
 
 **Tip:** Embed **`prefix + chunk`** (Folio’s ingest already composes this) to get contextual embeddings.
+
+---
+
+## Calling OpenAI-style LLMs
+
+`OpenAIStyleClient` wraps the `/chat/completions` API shared by OpenAI, Groq, Together, etc.:
+
+```swift
+let client = OpenAIStyleClient(
+    configuration: .init(
+        baseURL: URL(string: "https://api.openai.com/v1")!,
+        apiKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"]!
+    )
+)
+
+let completion = try await client.chatCompletion(
+    model: "gpt-4o-mini",
+    messages: [
+        .init(role: .system, content: "You are a succinct assistant."),
+        .init(role: .user, content: "Summarize this: ...")
+    ],
+    temperature: 0.3,
+    maxTokens: 256
+)
+
+print(completion.choices.first?.message.content ?? "")
+```
+
+Use the same client for ingest-time prefix generation or final answer synthesis.
 
 ---
 
@@ -160,9 +256,9 @@ To use **EmbeddingGemma** on device:
 
 ```swift
 public final class FolioEngine {
-    public convenience init() throws
-    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws
-    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws -> FolioEngine
+    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws
+    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws
+    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws -> FolioEngine
     public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embedder: Embedder?) throws
 
     @discardableResult
@@ -170,6 +266,8 @@ public final class FolioEngine {
 
     @discardableResult
     public func ingestAsync(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) async throws -> (pages: Int, chunks: Int)
+
+    public func backfillEmbeddings(for sourceId: String? = nil, batch: Int = 64) throws
 
     public func search(_ query: String, in sourceId: String? = nil, limit: Int = 10) throws -> [Snippet]
     public func searchWithContext(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage]

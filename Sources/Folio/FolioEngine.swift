@@ -45,29 +45,29 @@ public final class FolioEngine {
     private let loaders: [DocumentLoader]
     private let chunker: Chunker
     private let embedder: Embedder?
-    
-    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws {
+
+    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws {
         let url = try FolioEngine.defaultDatabaseURL()
         let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
-        
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: nil)
+
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: embedder)
     }
-    
-    
-    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws {
+
+
+    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws {
         let url = try FolioEngine.appGroupDatabaseURL(identifier: identifier)
         let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
-        
-        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: nil)
+
+        try self.init(databaseURL: url, loaders: useLoaders, chunker: useChunker, embedder: embedder)
     }
-    
-    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws -> FolioEngine {
+
+    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws -> FolioEngine {
         let useLoaders = loaders ?? [PDFDocumentLoader(), TextDocumentLoader()]
         let useChunker = chunker ?? UniversalChunker()
-        
-        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embedder: nil)
+
+        return try FolioEngine(databaseURL: URL(fileURLWithPath: ":memory:"), loaders: useLoaders, chunker: useChunker, embedder: embedder)
     }
     
     public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embedder: Embedder?) throws {
@@ -203,6 +203,32 @@ public final class FolioEngine {
         }
         
         return results
+    }
+
+    /// Computes embeddings for any chunks that are missing a vector and persists them for hybrid search fusion.
+    /// Keeping BM25 and cosine in sync is critical so both scorers see identical chunk sets.
+    /// - Parameters:
+    ///   - sourceId: Optionally scope the work to a specific source hierarchy.
+    ///   - batch: The number of chunks to embed per API call.
+    public func backfillEmbeddings(for sourceId: String? = nil, batch: Int = 64) throws {
+        guard let embedder else {
+            throw NSError(domain: "Folio", code: 410, userInfo: [NSLocalizedDescriptionKey: "Embedder not configured"])
+        }
+        precondition(batch > 0, "batch must be positive")
+
+        while true {
+            let chunks = try store.fetchEmbeddableChunks(for: sourceId, limit: batch)
+            if chunks.isEmpty { break }
+
+            let embeddings = try embedder.embedBatch(chunks.map(\.text))
+            guard embeddings.count == chunks.count else {
+                throw NSError(domain: "Folio", code: 411, userInfo: [NSLocalizedDescriptionKey: "Embedding count mismatch"])
+            }
+
+            for (chunk, vector) in zip(chunks, embeddings) {
+                try store.insertVector(rowid: chunk.rowid, dim: vector.count, vector: vector)
+            }
+        }
     }
     
     public func searchHybrid(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult] {
