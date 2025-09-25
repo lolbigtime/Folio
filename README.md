@@ -1,75 +1,78 @@
 # Folio
 
 Folio is a zero‑config retrieval engine for iOS and macOS.  
-It ingests PDFs and text, strips headers/footers, chunks content, and indexes it into SQLite with **BM25 (FTS5)**.  
+It ingests PDFs and text, strips headers/footers, chunks content, and indexes it into SQLite with **BM25 (FTS5)**.
 
 It also supports **Anthropic‑style contextual retrieval**:
-- LLM‑generated **one‑line prefixes** per chunk (pluggable prompts)
+- LLM‑generated **one‑line prefixes** per chunk (using Folio’s prompt templates)
 - Optional **contextual embeddings** (e.g., EmbeddingGemma, LLaMA)
 - **Hybrid search**: BM25 + vectors with rank fusion
 - **Neighbor expansion**: join ± adjacent chunks for coherent RAG passages
 
 ---
 
-## Installation (Swift Package Manager)
+## Installation — Swift Package Manager
 
-1. In Xcode: **File → Add Packages…**  
-2. Enter your repo URL and add the **Folio** package.  
-3. Target settings → **Build Phases → Copy Bundle Resources**: ensure the `Resources/Migrations/*.sql` files are included (SPM’s `.process` resources).
+### Xcode
+1. **File → Add Packages…**
+2. Enter: `https://github.com/lolbigtime/Folio`
+3. Add the **Folio** product to your app target.
 
-**Package.swift snippet (if consuming manually):**
+> **Note:** SPM resources are already configured. Make sure your app bundles the package resources (the SQL migration files) automatically. No extra steps needed in most projects.
+
+### `Package.swift` (if integrating programmatically)
 ```swift
-.dependencies: [
-    .package(url: "https://github.com/your-org/folio.git", .upToNextMinor(from: "0.1.0"))
+// In your app’s Package.swift
+.dependencies = [
+    .package(url: "https://github.com/lolbigtime/Folio", .upToNextMinor(from: "0.1.0"))
 ]
+// In your target:
+.product(name: "Folio", package: "Folio")
 ```
 
 ---
 
-## Pipeline Overview
+## Pipeline
 
 ```mermaid
 flowchart TD
-    A[PDF or Text Input] --> B[DocumentLoader]
+    A[PDF or Text input] --> B[DocumentLoader]
     B --> C[HeaderFooterFilter]
     C --> D[Chunker]
-    D --> E{Contextual Prefix?}
-    E -- Yes --> F[LLM Prefix Generator]
-    E -- No --> G[Raw Chunks]
-    F --> H[Augmented Chunk: prefix + text]
+    D --> E{Add contextual prefix}
+    E -- yes --> F[LLM prefix generator]
+    E -- no --> G[Raw chunks]
+    F --> H[Augmented chunk - prefix + text]
     G --> H
-    H --> I[Embedder (optional)]
-    H --> J[SQLite FTS5: BM25 Index]
-    I --> K[Vector Store]
-    J --> L[BM25 Search]
-    K --> M[Vector Scoring]
-    L --> N[Rank Fusion]
+    H --> I[Embedder optional]
+    H --> J[SQLite FTS5 BM25 index]
+    I --> K[Vector store]
+    J --> L[BM25 search]
+    K --> M[Vector scoring]
+    L --> N[Rank fusion]
     M --> N
-    N --> O[Neighbor Expansion]
-    O --> P[Retrieved Passages]
+    N --> O[Neighbor expansion]
+    O --> P[Retrieved passages]
 ```
-
-> If you see a Mermaid render error on GitHub: make sure the block starts with ```` ```mermaid ```` exactly and that labels don’t contain unmatched parentheses.
 
 ---
 
 ## Quick Start
 
-### Basic BM25 only
+### Basic BM25
 ```swift
 import Folio
 
 let folio = try FolioEngine()
-
 try folio.ingest(.text("hello world from folio", name: "note.txt"), sourceId: "T1")
 
 let hits = try folio.search("hello", in: "T1", limit: 5)
 for h in hits {
-    print("• \(h.sourceId): \(h.excerpt)  [score=\(h.score)]")
+    print("• \(h.sourceId): \(h.excerpt)")
 }
 ```
 
-### Contextual prefixes with an LLM (Anthropic‑style)
+### Contextual prefixes with an LLM
 ```swift
 var cfg = FolioConfig()
 cfg.indexing.useContextualPrefix = true
@@ -103,19 +106,59 @@ let engine = try FolioEngine(
     embedder: EmbeddingGemmaEmbedder(dim: 256) // your wrapper
 )
 
-let passages = try engine.searchHybrid("optimizer settings", in: "Doc1", limit: 5, expand: 1)
-for p in passages {
-    print("• \(p.sourceId) p.\(p.startPage ?? 0)  [bm25=\(p.bm25), cos=\(p.cosine ?? .nan), score=\(p.score)]")
-    print(p.text)
+let results = try engine.searchHybrid("optimizer settings", in: "Doc1", limit: 5, expand: 1)
+for r in results {
+    print("• \(r.sourceId) p.\(r.startPage ?? 0)  [bm25=\(r.bm25), cos=\(r.cosine ?? .nan), score=\(r.score)]")
 }
 ```
+
+---
+
+## Using a Local LLM for Prefixes
+
+Folio ships **prompt templates** (`LLMPrefixPrompter`, `ChunkContext`) that follow Anthropic’s cookbook.  
+You can use **any** on‑device or remote LLM:
+
+- **On device (recommended):** run a small instruction model (e.g., Gemma‑Instruct, LLaMA‑Instruct) via your preferred runtime (ggml/gguf, MLC, llama.cpp wrapper, etc.).  
+- Return **one short line** (≤~80 tokens) per chunk. Folio caches it in `prefix_cache` and prepends it during indexing and embedding.
+
+Minimal app‑side hook (already shown above):
+```swift
+cfg.indexing.contextFn = { doc, page, chunk in
+    let prompt = LLMPrefixPrompter.build(ChunkContext(docName: doc.name, pageIndex: page.index, chunkText: chunk))
+    let raw = try await MyLocalLLM.generate(prompt: prompt,
+                                            maxTokens: LLMPrefixPrompter.maxOutputTokens,
+                                            stop: LLMPrefixPrompter.stop)
+    return LLMPrefixPrompter.sanitize(raw)
+}
+```
+
+---
+
+## Using EmbeddingGemma (or another embedder)
+
+Folio exposes an `Embedder` protocol:
+
+```swift
+public protocol Embedder: Sendable {
+    func embed(_ text: String) throws -> [Float]
+    func embedBatch(_ texts: [String]) throws -> [[Float]]
+}
+```
+
+To use **EmbeddingGemma** on device:
+1. Obtain the EmbeddingGemma model files (prefer a quantized variant).  
+2. Load them with your chosen runtime (e.g., gguf/llama.cpp‑style wrapper, Core ML if converted).  
+3. Implement `EmbeddingGemmaEmbedder: Embedder` that returns a fixed‑length `[Float]`.  
+4. Initialize `FolioEngine(..., embedder: YourEmbedder)` and ingest with `ingestAsync` so vectors are stored.
+
+**Tip:** Embed **`prefix + chunk`** (Folio’s ingest already composes this) to get contextual embeddings.
 
 ---
 
 ## Public API (high‑level)
 
 ```swift
-// Engine
 public final class FolioEngine {
     public convenience init() throws
     public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws
@@ -137,67 +180,21 @@ public final class FolioEngine {
 }
 ```
 
-### Config types
-```swift
-public struct FolioConfig {
-    public var chunking = ChunkingConfig()
-    public var indexing = IndexingConfig()
-    public init() {}
-}
-
-public struct IndexingConfig: Sendable {
-    public var useContextualPrefix = true
-    public var contextFn: (@Sendable (_ doc: LoadedDocument, _ page: LoadedPage, _ chunk: String) async throws -> String)? = nil
-    public init() {}
-}
-```
-
-### Prompt templates
-```swift
-let ctx = ChunkContext(docName: doc.name, pageIndex: page.index, sectionHeader: page.header, chunkText: chunk)
-let prompt = LLMPrefixPrompter.build(ctx)
-// Use MyLocalLLM.generate(prompt:..., maxTokens:..., stop: LLMPrefixPrompter.stop)
-```
-
 ---
 
-## Migrations & Schema
+## Schema / Migrations
 
-Migrations live in `Resources/Migrations/` and are processed by SPM. Ensure they’re included as **processed resources**.
+Migrations are bundled as SPM resources and applied at runtime:
 
-- `001_core.sql` — `sources`, `doc_chunks`  
-- `002_fts.sql` — `doc_chunks_fts` (FTS5 mirror; use `bm25(doc_chunks_fts)` and `snippet(...)`)  
-- `003_indexes.sql` — helpful indexes  
-- `004_prefix_cache.sql` — `prefix_cache` (LLM prefix memoization)  
+- `001_core.sql` — `sources`, `doc_chunks`
+- `002_fts.sql` — `doc_chunks_fts` (FTS5 mirror)
+- `003_indexes.sql` — helpful indexes
+- `004_prefix_cache.sql` — `prefix_cache` for LLM prefixes
 - `005_embeddings.sql` — `doc_chunk_vectors(rowid, dim, vec BLOB)`
 
-**Notes**
-- `section_title` in `doc_chunks` stores the prefix; FTS content receives `prefix + chunk`.
-- For BM25 snippets without prefix, use the store’s `ftsHits` which strips it from `snippet(...)` display.
-- If you ever add a `position` column, prefer `(source_id, position)` for neighbor ordering over `rowid`.
-
----
-
-## Embedders
-
-Implement the `Embedder` protocol:
-
-```swift
-public protocol Embedder: Sendable {
-    func embed(_ text: String) throws -> [Float]
-    func embedBatch(_ texts: [String]) throws -> [[Float]]
-}
-```
-
-**Recommendation**: embed **prefix + chunk** (contextual embeddings). Store vectors via `ingestAsync` which uses `insertReturningRowid` → `insertVector` automatically when `embedder` is provided.
-
----
-
-## Testing (smoke)
-
-- Ingest simple text, search for a term → non‑empty.  
-- With prefixes enabled, verify displayed snippets don’t contain the prefix.  
-- With vectors present, verify `searchHybrid` reorders results plausibly.
+Notes:
+- `section_title` stores the prefix; FTS content receives **prefix + chunk**.
+- `searchWithContext` shows prefix‑free snippets; hybrid uses the same candidates plus vectors.
 
 ---
 
