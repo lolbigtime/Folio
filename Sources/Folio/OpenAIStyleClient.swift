@@ -6,10 +6,10 @@ import FoundationNetworking
 public struct OpenAIStyleClient: Sendable {
     public struct Configuration: Sendable {
         public let baseURL: URL
-        public let apiKey: String
+        public let apiKey: String?
         public let timeout: TimeInterval
 
-        public init(baseURL: URL, apiKey: String, timeout: TimeInterval = 60) {
+        public init(baseURL: URL = URL(string: "http://127.0.0.1:11434/v1")!, apiKey: String? = nil, timeout: TimeInterval = 60) {
             self.baseURL = baseURL
             self.apiKey = apiKey
             self.timeout = timeout
@@ -93,7 +93,9 @@ public struct OpenAIStyleClient: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        if let key = config.apiKey {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
         request.timeoutInterval = config.timeout
         request.httpBody = try JSONEncoder().encode(body)
 

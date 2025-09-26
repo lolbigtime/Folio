@@ -100,9 +100,8 @@ _ = try await folio.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: cfg)
 ```swift
 let gemma = EmbeddingGemmaEmbedder(
     configuration: .init(
-        apiKey: ProcessInfo.processInfo.environment["GOOGLE_API_KEY"]!,
-        model: "models/embedding-gemma-002",
-        outputDimensionality: 768 // Optional Matryoshka truncation.
+        baseURL: URL(string: "http://127.0.0.1:11434")!,
+        model: "gemma:2b"
     )
 )
 
@@ -127,11 +126,7 @@ import Folio
 import Foundation
 
 let gemma = EmbeddingGemmaEmbedder(
-    configuration: .init(
-        apiKey: ProcessInfo.processInfo.environment["GOOGLE_API_KEY"]!,
-        model: "models/embedding-gemma-002",
-        outputDimensionality: 768
-    )
+    configuration: .init(model: "gemma:2b")
 )
 
 let engine = try FolioEngine(embedder: gemma)
@@ -154,12 +149,7 @@ let context = passages
     .map { "Source: \($0.sourceId) page \($0.startPage ?? 0)\n\($0.text)" }
     .joined(separator: "\n\n---\n\n")
 
-let client = OpenAIStyleClient(
-    configuration: .init(
-        baseURL: URL(string: "https://api.openai.com/v1")!,
-        apiKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"]!
-    )
-)
+let client = OpenAIStyleClient() // defaults to Ollama's /v1/chat/completions on localhost
 
 Task {
     let answer = try await client.chatCompletion(
@@ -213,11 +203,12 @@ public protocol Embedder: Sendable {
 }
 ```
 
-To use **EmbeddingGemma** as released in [Google’s announcement](https://developers.googleblog.com/en/introducing-embeddinggemma/):
-1. Enable the **Generative Language API** (or Vertex AI) and create an API key with access to `embedding-gemma`.
-2. Initialize `EmbeddingGemmaEmbedder(configuration:)` with the API key, the published model id (for example `models/embedding-gemma-002`), and an optional `outputDimensionality` if you want Matryoshka truncation (128/256/512/768).
-3. Pass the embedder into `FolioEngine(..., embedder: gemma)` and call `backfillEmbeddings` after ingest so cosine has vectors for every BM25 chunk.
-4. (Optional) Supply your own on-device runtime by conforming to `Embedder`; Folio’s adapter demonstrates the contract that hybrid retrieval expects.
+To use **EmbeddingGemma** locally:
+1. Install [Ollama](https://ollama.com) (or another on-device runtime) and run `ollama pull gemma:2b`.
+2. Start the Ollama service (`ollama serve`), which listens on `http://127.0.0.1:11434`.
+3. Initialize `EmbeddingGemmaEmbedder(configuration:)` with the model name you pulled (for example `gemma:2b`).
+4. Pass the embedder into `FolioEngine(..., embedder: gemma)` and call `backfillEmbeddings` after ingest so cosine has vectors for every BM25 chunk.
+5. (Optional) If you use a different runtime, conform to `Embedder` and proxy to its embedding API.
 
 **Tip:** Embed **`prefix + chunk`** (Folio’s ingest already composes this) to get contextual embeddings.
 
@@ -225,15 +216,11 @@ To use **EmbeddingGemma** as released in [Google’s announcement](https://devel
 
 ## Calling OpenAI-style LLMs
 
-`OpenAIStyleClient` wraps the `/chat/completions` API shared by OpenAI, Groq, Together, etc.:
+`OpenAIStyleClient` wraps the `/chat/completions` API surfaced by on-device runtimes such as **Ollama** (default) as well as hoste
+d providers:
 
 ```swift
-let client = OpenAIStyleClient(
-    configuration: .init(
-        baseURL: URL(string: "https://api.openai.com/v1")!,
-        apiKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"]!
-    )
-)
+let client = OpenAIStyleClient() // defaults to http://127.0.0.1:11434/v1
 
 let completion = try await client.chatCompletion(
     model: "gpt-4o-mini",

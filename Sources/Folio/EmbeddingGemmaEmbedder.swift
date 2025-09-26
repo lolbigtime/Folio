@@ -4,33 +4,29 @@ import FoundationNetworking
 #endif
 import Dispatch
 
-/// Talks to Google’s EmbeddingGemma endpoints described in
-/// https://developers.googleblog.com/en/introducing-embeddinggemma/ via the Generative Language API.
-/// The adapter batches requests with `batchEmbedContents` so Folio can hydrate vectors quickly.
+/// On-device adapter that talks to a local EmbeddingGemma runtime.
+///
+/// Folio expects embeddings to be available without reaching out to hosted APIs so apps can
+/// ship fully offline if desired. Tools like [Ollama](https://ollama.com) expose Gemma
+/// embeddings through a lightweight HTTP server on `localhost`. This adapter keeps the
+/// networking surface area small and performs one request per chunk, which matches
+/// the streaming nature of many on-device runtimes.
 public struct EmbeddingGemmaEmbedder: Embedder {
     public struct Configuration: Sendable {
-        /// API key issued by Google AI Studio / Generative Language API.
-        public let apiKey: String
-        /// Fully-qualified model identifier (e.g. "models/embedding-gemma-002").
-        public let model: String
-        /// Base endpoint for the Generative Language API. Defaults to googleapis.com.
-        public let baseURL: URL
-        /// Optional Matryoshka output dimensionality (768 default, 512/256/128 supported by EmbeddingGemma).
-        public let outputDimensionality: Int?
-        /// Request timeout.
-        public let timeout: TimeInterval
+        /// Base URL of the local embedding server. Defaults to Ollama's standard port.
+        public var baseURL: URL
+        /// Model identifier understood by the runtime (e.g. "gemma:2b" or "gemma:7b" with an embedding template).
+        public var model: String
+        /// Optional timeout applied to each request.
+        public var timeout: TimeInterval
 
         public init(
-            apiKey: String,
-            model: String,
-            baseURL: URL = URL(string: "https://generativelanguage.googleapis.com/")!,
-            outputDimensionality: Int? = nil,
+            baseURL: URL = URL(string: "http://127.0.0.1:11434")!,
+            model: String = "gemma:2b",
             timeout: TimeInterval = 60
         ) {
-            self.apiKey = apiKey
-            self.model = model
             self.baseURL = baseURL
-            self.outputDimensionality = outputDimensionality
+            self.model = model
             self.timeout = timeout
         }
     }
@@ -38,7 +34,7 @@ public struct EmbeddingGemmaEmbedder: Embedder {
     private let config: Configuration
     private let session: URLSession
 
-    public init(configuration: Configuration, session: URLSession = .shared) {
+    public init(configuration: Configuration = .init(), session: URLSession = .shared) {
         self.config = configuration
         self.session = session
     }
@@ -50,44 +46,19 @@ public struct EmbeddingGemmaEmbedder: Embedder {
     public func embedBatch(_ texts: [String]) throws -> [[Float]] {
         guard !texts.isEmpty else { return [] }
 
-        let endpointPath = "v1beta/\(config.model):batchEmbedContents"
-        guard let endpoint = URL(string: endpointPath, relativeTo: config.baseURL) else {
-            throw NSError(domain: "Folio", code: 430, userInfo: [NSLocalizedDescriptionKey: "Invalid EmbeddingGemma endpoint"])
-        }
-
-        let payload = BatchEmbedRequest(
-            requests: texts.map { text in
-                BatchEmbedRequest.Request(
-                    model: config.model,
-                    content: .init(parts: [.init(text: text)]),
-                    config: config.outputDimensionality.map { .init(outputDimensionality: $0) }
-                )
-            }
-        )
-
-        let data = try performRequest(url: endpoint, body: payload)
-        let decoder = JSONDecoder()
-        let response = try decoder.decode(BatchEmbedResponse.self, from: data)
-
-        guard response.embeddings.count == texts.count else {
-            throw NSError(domain: "Folio", code: 431, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma returned unexpected count"])
-        }
-
-        return try response.embeddings.map { embedding in
-            guard let values = embedding.values else {
-                throw NSError(domain: "Folio", code: 432, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma response missing values"])
-            }
-            return values.map { Float($0) }
+        return try texts.map { text in
+            try embedSingle(text: text)
         }
     }
 
-    private func performRequest<Body: Encodable>(url: URL, body: Body) throws -> Data {
-        var request = URLRequest(url: url)
+    private func embedSingle(text: String) throws -> [Float] {
+        let endpoint = config.baseURL.appendingPathComponent("api/embeddings")
+
+        var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(config.apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = config.timeout
-        request.httpBody = try JSONEncoder().encode(body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(EmbeddingRequest(model: config.model, input: text))
 
         let semaphore = DispatchSemaphore(value: 0)
         var result: Result<(Data, URLResponse), Error>?
@@ -98,7 +69,7 @@ public struct EmbeddingGemmaEmbedder: Embedder {
             } else if let data, let response {
                 result = .success((data, response))
             } else {
-                result = .failure(NSError(domain: "Folio", code: 433, userInfo: [NSLocalizedDescriptionKey: "Empty EmbeddingGemma response"]))
+                result = .failure(NSError(domain: "Folio", code: 520, userInfo: [NSLocalizedDescriptionKey: "Empty embedding response"]))
             }
             semaphore.signal()
         }
@@ -107,65 +78,34 @@ public struct EmbeddingGemmaEmbedder: Embedder {
         let waitResult = semaphore.wait(timeout: .now() + config.timeout)
         if waitResult == .timedOut {
             task.cancel()
-            throw NSError(domain: "Folio", code: 434, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma request timed out"])
+            throw NSError(domain: "Folio", code: 521, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma request timed out"])
         }
 
-        guard let result else {
-            throw NSError(domain: "Folio", code: 435, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma missing result"])
+        guard let outcome = result else {
+            throw NSError(domain: "Folio", code: 522, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma request missing result"])
         }
 
-        let (data, response) = try result.get()
+        let (data, response) = try outcome.get()
         guard let http = response as? HTTPURLResponse else {
-            throw NSError(domain: "Folio", code: 436, userInfo: [NSLocalizedDescriptionKey: "Invalid EmbeddingGemma HTTP response"])
+            throw NSError(domain: "Folio", code: 523, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma invalid response"])
         }
 
         guard (200..<300).contains(http.statusCode) else {
-            if let apiError = try? JSONDecoder().decode(APIErrorResponse.self, from: data) {
-                let message = apiError.error.message
-                throw NSError(domain: "Folio", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma error: \(message)"])
-            }
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw NSError(domain: "Folio", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma HTTP \(http.statusCode): \(body)"])
+            let text = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "Folio", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "EmbeddingGemma server error: \(text)"])
         }
 
-        return data
+        let decoded = try JSONDecoder().decode(EmbeddingResponse.self, from: data)
+        return decoded.embedding.map { Float($0) }
     }
 }
 
-private struct BatchEmbedRequest: Encodable {
-    struct Request: Encodable {
-        struct Content: Encodable {
-            let parts: [Part]
-        }
-
-        struct Part: Encodable {
-            let text: String
-        }
-
-        struct Config: Encodable {
-            let outputDimensionality: Int
-        }
-
-        let model: String
-        let content: Content
-        let config: Config?
-    }
-
-    let requests: [Request]
+private struct EmbeddingRequest: Encodable {
+    let model: String
+    let input: String
 }
 
-private struct BatchEmbedResponse: Decodable {
-    struct Embedding: Decodable {
-        let values: [Double]?
-    }
-
-    let embeddings: [Embedding]
+private struct EmbeddingResponse: Decodable {
+    let embedding: [Double]
 }
 
-private struct APIErrorResponse: Decodable {
-    struct APIError: Decodable {
-        let message: String
-    }
-
-    let error: APIError
-}
