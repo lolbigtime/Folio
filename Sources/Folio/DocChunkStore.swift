@@ -46,6 +46,13 @@ extension DocChunkStore {
         public let dim: Int
         public let vec: [Float]
     }
+
+    public struct EmbeddableChunk: Sendable {
+        public let rowid: Int64
+        public let sourceId: String
+        public let page: Int?
+        public let text: String
+    }
     
     func cacheKey(sourceId: String, page: Int?, chunk:String) -> String {
         let base = "\(sourceId)|\(page ?? -1)|\(chunk)"
@@ -189,7 +196,38 @@ extension DocChunkStore {
             }
         }
     }
-    
+
+    func fetchEmbeddableChunks(for sourceId: String?, limit: Int) throws -> [EmbeddableChunk] {
+        guard limit > 0 else { return [] }
+        return try dbQueue.read { db in
+            var sql = """
+                SELECT d.rowid, d.source_id, d.page, d.content
+                FROM doc_chunks AS d
+                LEFT JOIN doc_chunk_vectors AS v ON v.rowid = d.rowid
+                WHERE v.rowid IS NULL
+            """
+            var args: [DatabaseValueConvertible] = []
+
+            if let sourceId {
+                sql += " AND (d.source_id = ? OR d.source_id LIKE ?)"
+                args.append(contentsOf: [sourceId, "\(sourceId) p.%"])
+            }
+
+            sql += " ORDER BY d.rowid LIMIT ?"
+            args.append(limit)
+
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            return rows.map { row in
+                EmbeddableChunk(
+                    rowid: row["rowid"],
+                    sourceId: row["source_id"],
+                    page: row["page"],
+                    text: row["content"]
+                )
+            }
+        }
+    }
+
 }
 
 
