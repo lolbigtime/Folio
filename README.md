@@ -100,9 +100,9 @@ _ = try await folio.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: cfg)
 ```swift
 let gemma = EmbeddingGemmaEmbedder(
     configuration: .init(
-        baseURL: URL(string: "https://api.groq.com")!,
-        apiKey: ProcessInfo.processInfo.environment["GROQ_API_KEY"]!,
-        model: "text-embedding-3-large"
+        apiKey: ProcessInfo.processInfo.environment["GOOGLE_API_KEY"]!,
+        model: "models/embedding-gemma-002",
+        outputDimensionality: 768 // Optional Matryoshka truncation.
     )
 )
 
@@ -128,9 +128,9 @@ import Foundation
 
 let gemma = EmbeddingGemmaEmbedder(
     configuration: .init(
-        baseURL: URL(string: "https://api.groq.com")!,
-        apiKey: ProcessInfo.processInfo.environment["GROQ_API_KEY"]!,
-        model: "text-embedding-3-large"
+        apiKey: ProcessInfo.processInfo.environment["GOOGLE_API_KEY"]!,
+        model: "models/embedding-gemma-002",
+        outputDimensionality: 768
     )
 )
 
@@ -213,11 +213,11 @@ public protocol Embedder: Sendable {
 }
 ```
 
-To use **EmbeddingGemma** on device:
-1. Obtain credentials for an OpenAI‑style `/embeddings` endpoint (Groq, Together, Vertex, etc.) or host Gemma yourself.
-2. Initialize `EmbeddingGemmaEmbedder(configuration:)` with the endpoint URL, API key, and model name.
-3. Pass the embedder into `FolioEngine(..., embedder: gemma)` and call `backfillEmbeddings` after ingest.
-4. (Optional) Provide your own runtime by conforming to `Embedder`; Folio’s adapter shows the expected contract.
+To use **EmbeddingGemma** as released in [Google’s announcement](https://developers.googleblog.com/en/introducing-embeddinggemma/):
+1. Enable the **Generative Language API** (or Vertex AI) and create an API key with access to `embedding-gemma`.
+2. Initialize `EmbeddingGemmaEmbedder(configuration:)` with the API key, the published model id (for example `models/embedding-gemma-002`), and an optional `outputDimensionality` if you want Matryoshka truncation (128/256/512/768).
+3. Pass the embedder into `FolioEngine(..., embedder: gemma)` and call `backfillEmbeddings` after ingest so cosine has vectors for every BM25 chunk.
+4. (Optional) Supply your own on-device runtime by conforming to `Embedder`; Folio’s adapter demonstrates the contract that hybrid retrieval expects.
 
 **Tip:** Embed **`prefix + chunk`** (Folio’s ingest already composes this) to get contextual embeddings.
 
