@@ -125,6 +125,35 @@ private func normalize(_ s: String) -> String {
     normalized = normalized.replacingOccurrences(of: "\u{2028}", with: "\n")
     normalized = normalized.replacingOccurrences(of: "\u{2029}", with: "\n")
 
+    // Collapse soft hyphenation introduced by layout-driven line wraps so tokenization keeps
+    // original words intact (e.g., "multi-\nline" -> "multiline").
+    let hyphenJoiners: Set<Character> = ["-", "\u{2010}", "\u{2011}"]
+    let letters = CharacterSet.letters
+    var collapsed = String()
+    var index = normalized.startIndex
+    while index < normalized.endIndex {
+        let character = normalized[index]
+
+        if hyphenJoiners.contains(character) {
+            let newlineIndex = normalized.index(after: index)
+            if newlineIndex < normalized.endIndex, normalized[newlineIndex] == "\n" {
+                let afterNewline = normalized.index(after: newlineIndex)
+                if afterNewline < normalized.endIndex {
+                    let nextCharacter = normalized[afterNewline]
+                    let isLetter = nextCharacter.unicodeScalars.allSatisfy { letters.contains($0) }
+                    if isLetter {
+                        index = afterNewline
+                        continue
+                    }
+                }
+            }
+        }
+
+        collapsed.append(character)
+        index = normalized.index(after: index)
+    }
+    normalized = collapsed
+
     let allowed: Set<UnicodeScalar> = ["\n", "\t"]
     let view = normalized.unicodeScalars.compactMap { scalar -> UnicodeScalar? in
         if CharacterSet.controlCharacters.contains(scalar) {
