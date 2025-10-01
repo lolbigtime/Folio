@@ -98,17 +98,79 @@ _ = try await folio.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: cfg)
 
 ### Hybrid retrieval (BM25 + vectors + fusion + expand)
 ```swift
-// Provide an embedder (e.g., EmbeddingGemma) at init
+let gemma = EmbeddingGemmaEmbedder(
+    configuration: .init(
+        baseURL: URL(string: "http://127.0.0.1:11434")!,
+        model: "gemma:2b",
+        encodingFormat: .float
+    )
+)
+
 let engine = try FolioEngine(
     databaseURL: dbURL,
     loaders: [PDFDocumentLoader(), TextDocumentLoader()],
     chunker: UniversalChunker(),
-    embedder: EmbeddingGemmaEmbedder(dim: 256) // your wrapper
+    embedder: gemma
 )
+
+try engine.backfillEmbeddings() // populate vectors for cosine scoring
 
 let results = try engine.searchHybrid("optimizer settings", in: "Doc1", limit: 5, expand: 1)
 for r in results {
     print("• \(r.sourceId) p.\(r.startPage ?? 0)  [bm25=\(r.bm25), cos=\(r.cosine ?? .nan), score=\(r.score)]")
+}
+```
+
+### End-to-end example (PDF + text + hybrid search + LLM answer)
+```swift
+import Folio
+import Foundation
+
+let gemma = EmbeddingGemmaEmbedder(
+    configuration: .init(
+        baseURL: URL(string: "http://127.0.0.1:11434")!,
+        model: "gemma:2b",
+        encodingFormat: .float
+    )
+)
+
+let engine = try FolioEngine(embedder: gemma)
+
+// Ingest different document types
+try engine.ingest(.pdf(pdfURL), sourceId: "manual")
+let noteText = try String(decoding: Data(contentsOf: notesURL), as: UTF8.self)
+try engine.ingest(.text(noteText, name: "release-notes.txt"), sourceId: "notes")
+
+// Make sure every chunk has a vector before hybrid search
+try engine.backfillEmbeddings(batch: 96)
+
+let passages = try engine.searchHybrid(
+    "How do I configure streaming mode?",
+    limit: 3,
+    expand: 2
+)
+
+let context = passages
+    .map { "Source: \($0.sourceId) page \($0.startPage ?? 0)\n\($0.text)" }
+    .joined(separator: "\n\n---\n\n")
+
+let client = OpenAIStyleClient() // defaults to Ollama's /v1/chat/completions on localhost
+
+Task {
+    let answer = try await client.chatCompletion(
+        model: "gpt-4o-mini",
+        messages: [
+            .init(role: .system, content: "You are a precise technical assistant."),
+            .init(
+                role: .user,
+                content: "Using only the provided documentation, answer: How do I configure streaming mode?\n\nContext:\n\(context)"
+            )
+        ],
+        temperature: 0.2,
+        maxTokens: 256
+    ).choices.first?.message.content ?? ""
+
+    print(answer)
 }
 ```
 
@@ -147,12 +209,37 @@ public protocol Embedder: Sendable {
 ```
 
 To use **EmbeddingGemma** on device:
-1. Obtain the EmbeddingGemma model files (prefer a quantized variant).  
-2. Load them with your chosen runtime (e.g., gguf/llama.cpp‑style wrapper, Core ML if converted).  
-3. Implement `EmbeddingGemmaEmbedder: Embedder` that returns a fixed‑length `[Float]`.  
-4. Initialize `FolioEngine(..., embedder: YourEmbedder)` and ingest with `ingestAsync` so vectors are stored.
+1. Run a local OpenAI-compatible runtime (e.g., `ollama serve`) and pull an embeddings-capable Gemma variant (`ollama pull gemma:2b`).
+2. Instantiate `EmbeddingGemmaEmbedder(configuration:)` with the runtime’s base URL, model name, and optional encoding format (set `.float` when the server returns raw floats, otherwise it will decode base64 vectors automatically).
+3. Pass the embedder into `FolioEngine(..., embedder: gemma)` and call `backfillEmbeddings` after ingest so every BM25 chunk gains a vector for cosine scoring.
+4. (Optional) Conform your own `Embedder` if you want to talk to a different provider.
 
-**Tip:** Embed **`prefix + chunk`** (Folio’s ingest already composes this) to get contextual embeddings.
+**Tip:** Folio embeds **`prefix + chunk`** (composed during ingest) to mimic Anthropic’s retrieval format and sharpen the semantic signal.
+
+---
+
+## Calling OpenAI-style LLMs
+
+`OpenAIStyleClient` wraps the `/v1/chat/completions` API surfaced by on-device runtimes (Ollama, llama.cpp bridges) or hosted
+providers:
+
+```swift
+let client = OpenAIStyleClient() // defaults to http://127.0.0.1:11434
+
+let completion = try await client.chatCompletion(
+    model: "gpt-4o-mini",
+    messages: [
+        .init(role: .system, content: "You are a succinct assistant."),
+        .init(role: .user, content: "Summarize this: ...")
+    ],
+    temperature: 0.3,
+    maxTokens: 256
+)
+
+print(completion.choices.first?.message.content ?? "")
+```
+
+Use the same client for ingest-time prefix generation or final answer synthesis. When answering, send the hybrid passages returned by `searchHybrid` so the LLM grounds its response on Folio’s retrieved context.
 
 ---
 
@@ -160,9 +247,9 @@ To use **EmbeddingGemma** on device:
 
 ```swift
 public final class FolioEngine {
-    public convenience init() throws
-    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws
-    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil) throws -> FolioEngine
+    public convenience init(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws
+    public convenience init(appGroup identifier: String, loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws
+    public static func inMemory(loaders: [DocumentLoader]? = nil, chunker: Chunker? = nil, embedder: Embedder? = nil) throws -> FolioEngine
     public init(databaseURL: URL, loaders: [DocumentLoader], chunker: Chunker, embedder: Embedder?) throws
 
     @discardableResult
@@ -170,6 +257,8 @@ public final class FolioEngine {
 
     @discardableResult
     public func ingestAsync(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) async throws -> (pages: Int, chunks: Int)
+
+    public func backfillEmbeddings(for sourceId: String? = nil, batch: Int = 64) throws
 
     public func search(_ query: String, in sourceId: String? = nil, limit: Int = 10) throws -> [Snippet]
     public func searchWithContext(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage]
