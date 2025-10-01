@@ -11,10 +11,10 @@ import PDFKit
 import Vision
 #endif
 
-internal struct PDFDocumentLoader: DocumentLoader {
+public struct PDFDocumentLoader: DocumentLoader {
     init() {}
 
-    func load(_ input: IngestInput) throws -> LoadedDocument {
+    public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .pdf(url) = input, let doc = PDFDocument(url: url) else {
             throw NSError(domain: "Folio", code: 401, userInfo: [NSLocalizedDescriptionKey: "PDF open failed"])
         }
@@ -100,10 +100,10 @@ internal struct PDFDocumentLoader: DocumentLoader {
     #endif
 }
 
-internal struct TextDocumentLoader: DocumentLoader {
+public struct TextDocumentLoader: DocumentLoader {
     init() {}
 
-    func load(_ input: IngestInput) throws -> LoadedDocument {
+    public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .text(s, name) = input else {
             throw NSError(domain: "Folio", code: 402, userInfo: [NSLocalizedDescriptionKey: "Not text"])
         }
