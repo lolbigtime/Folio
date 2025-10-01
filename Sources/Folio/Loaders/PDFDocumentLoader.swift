@@ -12,7 +12,7 @@ import Vision
 #endif
 
 public struct PDFDocumentLoader: DocumentLoader {
-    init() {}
+    public init() {}
 
     public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .pdf(url) = input, let doc = PDFDocument(url: url) else {
@@ -101,7 +101,7 @@ public struct PDFDocumentLoader: DocumentLoader {
 }
 
 public struct TextDocumentLoader: DocumentLoader {
-    init() {}
+    public init() {}
 
     public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .text(s, name) = input else {
