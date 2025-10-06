@@ -1,11 +1,11 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
 let package = Package(
     name: "Folio",
-    platforms: [.iOS(.v16), .macOS(.v15)],
+    platforms: [.iOS(.v26)],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
@@ -26,3 +26,4 @@ let package = Package(
         .testTarget(name: "FolioTests", dependencies: ["Folio"], resources: [.process("Fixtures")])
     ]
 )
+

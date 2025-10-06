@@ -1,8 +1,6 @@
-#if canImport(FoundationModels)
 import Foundation
 import FoundationModels
 
-@available(iOS 18.0, macOS 15.0, *)
 public actor FoundationModelsPrefixGenerator {
     public struct Configuration: Sendable {
         public var instructions: String
@@ -32,7 +30,7 @@ public actor FoundationModelsPrefixGenerator {
     Do not add trailing punctuation or numbering.
     """
 
-    private let session: LanguageModelSession
+    private var session: LanguageModelSession
     private let configuration: Configuration
 
     public init(configuration: Configuration = .init()) {
@@ -63,10 +61,10 @@ public actor FoundationModelsPrefixGenerator {
             chunkText: chunk,
             localeHint: configuration.locale
         )
-
+        
         let prompt = LLMPrefixPrompter.build(ctx)
         let raw = try await session.respond(to: prompt, options: configuration.options)
-        let sanitized = LLMPrefixPrompter.sanitize(raw)
+        let sanitized = LLMPrefixPrompter.sanitize(raw.content)
 
         guard !sanitized.isEmpty else {
             throw GenerationError.empty
@@ -109,7 +107,6 @@ public actor FoundationModelsPrefixGenerator {
     }
 }
 
-@available(iOS 18.0, macOS 15.0, *)
 public extension IndexingConfig {
     static func foundationModelPrefixes(
         configuration: FoundationModelsPrefixGenerator.Configuration = .init()
@@ -133,4 +130,3 @@ public extension IndexingConfig {
         }
     }
 }
-#endif
