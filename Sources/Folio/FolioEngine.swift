@@ -7,6 +7,19 @@
 
 import Foundation
 
+public func mapPassagesToResults(_ passages: [RetrievedPassage], scoreFromBM25: (Double) -> Double = { $0 }) -> [RetrievedResult] {
+    passages.map { p in
+        RetrievedResult(
+            sourceId: p.sourceId,
+            startPage: p.startPage,
+            excerpt: p.excerpt,
+            text: p.text,
+            bm25: p.bm25,
+            cosine: nil,
+            score: scoreFromBM25(p.bm25)
+        )
+    }
+}
 
 public struct IndexingConfig: Sendable {
     public var useContextualPrefix = true
