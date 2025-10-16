@@ -179,29 +179,46 @@ You can use **any** on‑device or remote LLM:
 - **On device (recommended):** run a small instruction model (e.g., Gemma‑Instruct, LLaMA‑Instruct, Apple’s Foundation Models) via your preferred runtime (ggml/gguf, MLC, llama.cpp wrapper, etc.).
 - Return **one short line** (≤~80 tokens) per chunk. Folio caches it in `prefix_cache` and prepends it during indexing and embedding.
 
-### Apple Foundation Models (built in)
+### Contextual prefixes with Apple Foundation models
 
-On iOS 18 / macOS 15 and newer you can call the on-device **Foundation Models** framework directly—no extra runtime required. Folio bundles a helper that wires the system model into the prefix cache:
+On iOS 18 / macOS 15 and newer you can call the on-device **Foundation Models** framework directly—no extra runtime required.
+
+Start with the retrofit helper built into Folio’s indexing config. It wires up the `LanguageModelSession`, caches responses, and gracefully falls back to the built-in contextualizer when Apple Intelligence isn’t available:
 
 ```swift
 if #available(iOS 18, macOS 15, *) {
+    var cfg = FolioConfig()
     cfg.indexing.useFoundationModelPrefixes()
+
+    _ = try await engine.ingestAsync(
+        .pdf(pdfURL),
+        sourceId: "Doc1",
+        config: cfg
+    )
 }
 ```
 
-The helper checks `SystemLanguageModel.default.availability`, uses the prefix prompt, and falls back to Folio’s heuristic prefix if Apple Intelligence is unavailable (for example, not enabled by the user).
-
-If you need tighter control (different locale, custom instructions, etc.), create a generator and re-use it across ingests:
+> **Advanced configuration:** Need to customize locale, instructions, or generation options? Build the indexing config explicitly and reuse it across ingests.
 
 ```swift
 if #available(iOS 18, macOS 15, *) {
-    let generator = FoundationModelsPrefixGenerator(
-        configuration: .init(locale: "en", instructions: "Keep prefixes under 8 words.")
+    var options = GenerationOptions()
+    options.temperature = 0.1
+
+    var cfg = FolioConfig()
+    cfg.indexing = .foundationModelPrefixes(
+        configuration: .init(
+            instructions: "Keep prefixes under 8 words.",
+            locale: "en",
+            options: options
+        )
     )
 
-    cfg.indexing.contextFn = { doc, page, chunk in
-        try await generator.prefix(for: doc, page: page, chunk: chunk)
-    }
+    _ = try await engine.ingestAsync(
+        .pdf(pdfURL),
+        sourceId: "Doc1",
+        config: cfg
+    )
 }
 ```
 
