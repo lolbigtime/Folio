@@ -98,12 +98,21 @@ _ = try await folio.ingestAsync(.pdf(pdfURL), sourceId: "Doc1", config: cfg)
 
 ### Hybrid retrieval (BM25 + vectors + fusion + expand)
 ```swift
+#if canImport(MediaPipeTasksText)
+import MediaPipeTasksText
+#endif
+
+#if canImport(MediaPipeTasksText)
+let mpTextEmbedder = try TextEmbedder(modelPath: Bundle.main.path(forResource: "embedding_gemma", ofType: "task"))
+let gemma: Embedder = MediaPipeTextEmbedderAdapter(embedder: mpTextEmbedder)
+#else
 let gemma = EmbeddingGemmaEmbedder(
     configuration: .init(
         baseURL: URL(string: "http://127.0.0.1:11434")!,
         model: "gemma:2b"
     )
 )
+#endif
 
 let engine = try FolioEngine(
     databaseURL: dbURL,
