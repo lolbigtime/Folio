@@ -169,19 +169,19 @@ public final class FolioEngine {
             }
 
             let augmented = prefix + c.text
-            let newRowId = try store.insertReturningRowid(
+            let newChunk = try store.insertReturningIdentifiers(
                 sourceId: c.sourceId,
                 page: c.page,
                 content: c.text,
                 sectionTitle: prefix,
                 ftsContent: augmented
             )
-            
+
             inserted += 1
             if let embedder {
                 let vec = try embedder.embed(augmented)
-                
-                try store.insertVector(rowid: newRowId, dim: vec.count, vector: vec)
+
+                try store.insertVector(chunkId: newChunk.chunkId, dim: vec.count, vector: vec)
             }
         }
 
@@ -239,11 +239,11 @@ public final class FolioEngine {
             }
 
             for (chunk, vector) in zip(chunks, embeddings) {
-                try store.insertVector(rowid: chunk.rowid, dim: vector.count, vector: vector)
+                try store.insertVector(chunkId: chunk.chunkId, dim: vector.count, vector: vector)
             }
         }
     }
-    
+
     public func searchHybrid(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1, wBM25: Double = 0.5) throws -> [RetrievedResult] {
         precondition(limit > 0 && expand >= 0, "invalid params")
         

@@ -329,7 +329,7 @@ Migrations are bundled as SPM resources and applied at runtime:
 - `002_fts.sql` — `doc_chunks_fts` (FTS5 mirror)
 - `003_indexes.sql` — helpful indexes
 - `004_prefix_cache.sql` — `prefix_cache` for LLM prefixes
-- `005_embeddings.sql` — `doc_chunk_vectors(rowid, dim, vec BLOB)`
+- `005_embeddings.sql` — `doc_chunk_vectors(chunk_id, dim, vec BLOB)`
 
 Notes:
 - `section_title` stores the prefix; FTS content receives **prefix + chunk**.

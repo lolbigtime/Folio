@@ -29,6 +29,7 @@ extension DocChunkStore {
     
     public struct SnippetHit: Sendable, Hashable {
         public let rowid: Int64
+        public let chunkId: String
         public let sourceId: String
         public let page: Int?
         public let excerpt: String
@@ -37,21 +38,29 @@ extension DocChunkStore {
 
     public struct NeighborChunk: Sendable {
         public let rowid: Int64
+        public let chunkId: String
         public let text: String
         public let page: Int?
     }
-    
+
     public struct VectorRow: Sendable {
         public let rowid: Int64
+        public let chunkId: String
         public let dim: Int
         public let vec: [Float]
     }
 
     public struct EmbeddableChunk: Sendable {
         public let rowid: Int64
+        public let chunkId: String
         public let sourceId: String
         public let page: Int?
         public let text: String
+    }
+
+    public struct ChunkIdentifier: Sendable, Hashable {
+        public let rowid: Int64
+        public let chunkId: String
     }
     
     func cacheKey(sourceId: String, page: Int?, chunk:String) -> String {
@@ -84,6 +93,7 @@ extension DocChunkStore {
             var sql = """
             SELECT
               d.rowid AS rowid,
+              d.id AS chunk_id,
               d.source_id AS source_id,
               d.page AS page,
               REPLACE(
@@ -110,6 +120,7 @@ extension DocChunkStore {
             return rows.map {
                 SnippetHit(
                     rowid: $0["rowid"],
+                    chunkId: $0["chunk_id"],
                     sourceId: $0["source_id"],
                     page: $0["page"],
                     excerpt: $0["excerpt"],
@@ -122,7 +133,7 @@ extension DocChunkStore {
     func fetchNeighbors(sourceId: String, around rowid: Int64, expand: Int) throws -> [NeighborChunk] {
         try dbQueue.read { db in
             let prevRows = try Row.fetchAll(db, sql: """
-                SELECT rowid, content, page
+                SELECT rowid, id AS chunk_id, content, page
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid < ?
                 ORDER BY rowid DESC
@@ -130,7 +141,7 @@ extension DocChunkStore {
             """, arguments: [sourceId, rowid, expand]).reversed()
 
             let nextRows = try Row.fetchAll(db, sql: """
-                SELECT rowid, content, page
+                SELECT rowid, id AS chunk_id, content, page
                 FROM doc_chunks
                 WHERE source_id = ? AND rowid >= ?
                 ORDER BY rowid ASC
@@ -138,13 +149,13 @@ extension DocChunkStore {
             """, arguments: [sourceId, rowid, expand + 1])
 
             let toChunk: (Row) -> NeighborChunk = { r in
-                NeighborChunk(rowid: r["rowid"], text: r["content"], page: r["page"])
+                NeighborChunk(rowid: r["rowid"], chunkId: r["chunk_id"], text: r["content"], page: r["page"])
             }
             return prevRows.map(toChunk) + nextRows.map(toChunk)
         }
     }
-    
-    func insertReturningRowid(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil, ftsContent: String? = nil) throws -> Int64 {
+
+    func insertReturningIdentifiers(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil, ftsContent: String? = nil) throws -> ChunkIdentifier {
         try dbQueue.write { db in
             let id = UUID().uuidString
 
@@ -161,30 +172,37 @@ extension DocChunkStore {
               )
             """, arguments: [id, ftsContent ?? content, sourceId, sectionTitle])
 
-            return try Int64.fetchOne(db,
+            let rowid = try Int64.fetchOne(db,
                 sql: "SELECT rowid FROM doc_chunks WHERE id = ?",
                 arguments: [id]
             )!
+
+            return ChunkIdentifier(rowid: rowid, chunkId: id)
         }
     }
-    
-    func insertVector(rowid: Int64, dim: Int, vector: [Float]) throws {
+
+    func insertVector(chunkId: String, dim: Int, vector: [Float]) throws {
         let data = vector.withUnsafeBufferPointer { Data(buffer: $0) }
         try dbQueue.write { db in
             try db.execute(sql: """
-              INSERT INTO doc_chunk_vectors(rowid, dim, vec) VALUES (?, ?, ?)
-              ON CONFLICT(rowid) DO UPDATE SET dim=excluded.dim, vec=excluded.vec
-            """, arguments: [rowid, dim, data])
+              INSERT INTO doc_chunk_vectors(chunk_id, dim, vec) VALUES (?, ?, ?)
+              ON CONFLICT(chunk_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec
+            """, arguments: [chunkId, dim, data])
         }
     }
-    
+
     func fetchVectors(forRowids rowids: [Int64]) throws -> [VectorRow] {
         guard !rowids.isEmpty else { return [] }
         let placeholders = Array(repeating: "?", count: rowids.count).joined(separator: ",")
         return try dbQueue.read { db in
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT rowid, dim, vec FROM doc_chunk_vectors WHERE rowid IN (\(placeholders))",
+                sql: """
+                    SELECT d.rowid AS rowid, d.id AS chunk_id, v.dim, v.vec
+                    FROM doc_chunks AS d
+                    JOIN doc_chunk_vectors AS v ON v.chunk_id = d.id
+                    WHERE d.rowid IN (\(placeholders))
+                """,
                 arguments: StatementArguments(rowids)
             )
             return rows.map { r in
@@ -192,7 +210,7 @@ extension DocChunkStore {
                 let data: Data = r["vec"]
                 var arr = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
                 _ = arr.withUnsafeMutableBytes { data.copyBytes(to: $0) }
-                return VectorRow(rowid: r["rowid"], dim: dim, vec: arr)
+                return VectorRow(rowid: r["rowid"], chunkId: r["chunk_id"], dim: dim, vec: arr)
             }
         }
     }
@@ -201,10 +219,10 @@ extension DocChunkStore {
         guard limit > 0 else { return [] }
         return try dbQueue.read { db in
             var sql = """
-                SELECT d.rowid, d.source_id, d.page, d.content
+                SELECT d.rowid, d.id AS chunk_id, d.source_id, d.page, d.content
                 FROM doc_chunks AS d
-                LEFT JOIN doc_chunk_vectors AS v ON v.rowid = d.rowid
-                WHERE v.rowid IS NULL
+                LEFT JOIN doc_chunk_vectors AS v ON v.chunk_id = d.id
+                WHERE v.chunk_id IS NULL
             """
             var args: [DatabaseValueConvertible] = []
 
@@ -220,6 +238,7 @@ extension DocChunkStore {
             return rows.map { row in
                 EmbeddableChunk(
                     rowid: row["rowid"],
+                    chunkId: row["chunk_id"],
                     sourceId: row["source_id"],
                     page: row["page"],
                     text: row["content"]
