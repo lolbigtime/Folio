@@ -52,6 +52,15 @@ public struct RetrievedResult: Sendable {
     public let score: Double
 }
 
+public struct DocumentFetch: Sendable {
+    public let sourceId: String
+    public let displayName: String
+    public let startPage: Int?
+    public let endPage: Int?
+    public let text: String
+    public let chunkIds: [String]
+}
+
 public final class FolioEngine {
     private let db: AppDatabase
     private let store:  DocChunkStore
@@ -193,7 +202,7 @@ public final class FolioEngine {
     public func searchWithContext(_ query: String, in sourceId: String? = nil, limit: Int = 5, expand: Int = 1) throws -> [RetrievedPassage] {
         precondition(limit > 0, "Limit needs to be greater than 0")
         precondition(expand >= 0, "Expand must be non-negative")
-        
+
         let hits = try store.ftsHits(query: query, inSource: sourceId, limit: max(limit * 6, 60))
         
         var results: [RetrievedPassage] = []
@@ -216,6 +225,55 @@ public final class FolioEngine {
         }
         
         return results
+    }
+
+    public func fetchDocument(sourceId: String, startPage: Int? = nil, anchor: String? = nil, expand: Int = 2, maxChars: Int? = 8000) throws -> DocumentFetch {
+        precondition(expand >= 0 && expand <= 8, "expand must be between 0 and 8")
+        if let startPage {
+            precondition(startPage >= 0, "startPage must be non-negative")
+        }
+        if let maxChars {
+            precondition(maxChars > 0, "maxChars must be positive")
+        }
+
+        guard let source = try store.fetchSource(id: sourceId) else {
+            throw NSError(domain: "Folio", code: 404, userInfo: [NSLocalizedDescriptionKey: "Source not found"])
+        }
+
+        let trimmedAnchor = anchor?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedAnchor = trimmedAnchor.flatMap { $0.isEmpty ? nil : $0 }
+        let anchorRowId = try normalizedAnchor.flatMap { try store.findAnchorRowid(sourceId: sourceId, anchor: $0) }
+
+        let chunks: [DocChunkStore.NeighborChunk]
+        if let rowid = anchorRowId {
+            chunks = try store.fetchNeighbors(sourceId: sourceId, around: rowid, expand: expand)
+        } else if let startPage {
+            chunks = try store.fetchChunks(forSourceId: sourceId, startingFromPage: startPage)
+        } else {
+            chunks = try store.fetchAllChunks(forSourceId: sourceId)
+        }
+
+        guard !chunks.isEmpty else {
+            return DocumentFetch(sourceId: sourceId, displayName: source.displayName, startPage: nil, endPage: nil, text: "", chunkIds: [])
+        }
+
+        let chunkIds = chunks.map(\.chunkId)
+        let startPage = chunks.compactMap(\.page).min()
+        let endPage = chunks.compactMap(\.page).max()
+
+        var text = chunks.map(\.text).joined(separator: "\n\n")
+        if let maxChars, text.count > maxChars {
+            text = String(text.prefix(maxChars))
+        }
+
+        return DocumentFetch(
+            sourceId: sourceId,
+            displayName: source.displayName,
+            startPage: startPage,
+            endPage: endPage,
+            text: text,
+            chunkIds: chunkIds
+        )
     }
 
     /// Computes embeddings for any chunks that are missing a vector and persists them for hybrid search fusion.

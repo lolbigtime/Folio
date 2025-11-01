@@ -21,4 +21,46 @@ final class FolioSmokeTests: XCTestCase {
 
         XCTAssertEqual(text, "multiline\nre-entry")
     }
+
+    func testFetchDocumentWithAnchorAndLimits() throws {
+        struct StubChunker: Chunker {
+            func chunk(sourceId: String, doc: LoadedDocument, config: ChunkingConfig) throws -> [Chunk] {
+                [
+                    Chunk(sourceId: sourceId, page: 0, text: "alpha beta gamma"),
+                    Chunk(sourceId: sourceId, page: 0, text: "delta epsilon zeta"),
+                    Chunk(sourceId: sourceId, page: 1, text: "eta theta iota")
+                ]
+            }
+        }
+
+        let engine = try FolioEngine.inMemory(chunker: StubChunker())
+        _ = try engine.ingest(.text("unused", name: "note.txt"), sourceId: "Doc1")
+
+        let full = try engine.fetchDocument(sourceId: "Doc1")
+        XCTAssertEqual(full.chunkIds.count, 3)
+        XCTAssertEqual(full.displayName, "note.txt")
+        XCTAssertEqual(full.startPage, 0)
+        XCTAssertEqual(full.endPage, 1)
+        XCTAssertTrue(full.text.contains("alpha beta gamma"))
+        XCTAssertTrue(full.text.contains("eta theta iota"))
+
+        let anchor = try engine.fetchDocument(sourceId: "Doc1", anchor: "epsilon", expand: 1)
+        XCTAssertEqual(anchor.chunkIds.count, 3)
+        XCTAssertTrue(anchor.text.contains("delta epsilon zeta"))
+        XCTAssertEqual(anchor.startPage, 0)
+        XCTAssertEqual(anchor.endPage, 1)
+
+        let fromPage = try engine.fetchDocument(sourceId: "Doc1", startPage: 1)
+        XCTAssertEqual(fromPage.chunkIds.count, 1)
+        XCTAssertEqual(fromPage.startPage, 1)
+        XCTAssertEqual(fromPage.endPage, 1)
+        XCTAssertTrue(fromPage.text.contains("eta theta iota"))
+
+        let missing = try engine.fetchDocument(sourceId: "Doc1", startPage: 1, anchor: "omega")
+        XCTAssertEqual(missing.chunkIds.count, 1)
+        XCTAssertEqual(missing.startPage, 1)
+
+        let truncated = try engine.fetchDocument(sourceId: "Doc1", maxChars: 20)
+        XCTAssertLessThanOrEqual(truncated.text.count, 20)
+    }
 }
