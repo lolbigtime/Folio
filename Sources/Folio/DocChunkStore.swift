@@ -155,6 +155,81 @@ extension DocChunkStore {
         }
     }
 
+    func fetchAllChunks(forSourceId sourceId: String) throws -> [NeighborChunk] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT rowid, id AS chunk_id, content, page
+                FROM doc_chunks
+                WHERE source_id = ?
+                ORDER BY rowid ASC
+            """, arguments: [sourceId])
+
+            return rows.map { row in
+                NeighborChunk(
+                    rowid: row["rowid"],
+                    chunkId: row["chunk_id"],
+                    text: row["content"],
+                    page: row["page"]
+                )
+            }
+        }
+    }
+
+    func fetchChunks(forSourceId sourceId: String, startingFromPage startPage: Int) throws -> [NeighborChunk] {
+        try dbQueue.read { db in
+            guard let pivotRowid = try Int64.fetchOne(
+                db,
+                sql: """
+                    SELECT rowid
+                    FROM doc_chunks
+                    WHERE source_id = ? AND COALESCE(page, 0) >= ?
+                    ORDER BY rowid ASC
+                    LIMIT 1
+                """,
+                arguments: [sourceId, startPage]
+            ) else {
+                return []
+            }
+
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT rowid, id AS chunk_id, content, page
+                FROM doc_chunks
+                WHERE source_id = ? AND rowid >= ?
+                ORDER BY rowid ASC
+            """, arguments: [sourceId, pivotRowid])
+
+            return rows.map { row in
+                NeighborChunk(
+                    rowid: row["rowid"],
+                    chunkId: row["chunk_id"],
+                    text: row["content"],
+                    page: row["page"]
+                )
+            }
+        }
+    }
+
+    func findAnchorRowid(sourceId: String, anchor: String) throws -> Int64? {
+        guard !anchor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        return try dbQueue.read { db in
+            try Int64.fetchOne(
+                db,
+                sql: """
+                    SELECT rowid
+                    FROM doc_chunks
+                    WHERE source_id = ?
+                      AND instr(lower(content), lower(?)) > 0
+                    ORDER BY rowid ASC
+                    LIMIT 1
+                """,
+                arguments: [sourceId, anchor]
+            )
+        }
+    }
+
     func insertReturningIdentifiers(sourceId: String, page: Int?, content: String, sectionTitle: String? = nil, ftsContent: String? = nil) throws -> ChunkIdentifier {
         try dbQueue.write { db in
             let id = UUID().uuidString
@@ -329,6 +404,31 @@ internal struct DocChunkStore {
                 Source(
                     id: row["id"], filePath: row["file_path"], displayName: row["display_name"],
                     pages: row["pages"], chunks: row["chunks"], importedAt: row["imported_at"]
+                )
+            }
+        }
+    }
+
+    func fetchSource(id: String) throws -> Source? {
+        try dbQueue.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT id, file_path, display_name, pages, chunks,
+                           COALESCE(imported_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')) AS imported_at
+                    FROM sources
+                    WHERE id = ?
+                    LIMIT 1
+                """,
+                arguments: [id]
+            ).map { row in
+                Source(
+                    id: row["id"],
+                    filePath: row["file_path"],
+                    displayName: row["display_name"],
+                    pages: row["pages"],
+                    chunks: row["chunks"],
+                    importedAt: row["imported_at"]
                 )
             }
         }
