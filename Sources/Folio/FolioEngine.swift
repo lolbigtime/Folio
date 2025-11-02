@@ -105,7 +105,7 @@ public final class FolioEngine {
     //Ingest any supported input with caller chosen sourceID
     @discardableResult
     public func ingest(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) throws -> (pages: Int, chunks: Int) {
-        guard let loader = loaders.first(where: { canLoad($0, input: input) }) else {
+        guard let loader = loaders.first(where: { $0.supports(input) }) else {
             throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
         }
         
@@ -140,7 +140,7 @@ public final class FolioEngine {
     @discardableResult
     public func ingestAsync(_ input: IngestInput, sourceId: String, config: FolioConfig = .init()) async throws -> (pages: Int, chunks: Int) {
         
-        guard let loader = loaders.first(where: { canLoad($0, input: input) }) else {
+        guard let loader = loaders.first(where: { $0.supports(input) }) else {
             throw NSError(domain: "Folio", code: 400, userInfo: [NSLocalizedDescriptionKey: "No loader for input"])
         }
         
@@ -383,14 +383,6 @@ public final class FolioEngine {
     
     public func listSources() throws -> [Source] {
         try store.listSources()
-    }
-    
-    private func canLoad(_ loader: DocumentLoader, input: IngestInput) -> Bool {
-        switch input {
-            case .pdf:  return loader is PDFDocumentLoader
-            case .text: return loader is TextDocumentLoader
-            case .data: return false // add a Data loader later
-        }
     }
     
     internal static func defaultDatabaseURL() throws -> URL {
