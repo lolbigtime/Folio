@@ -55,6 +55,7 @@ public struct ChunkingConfig: Sendable {
 
 ///Extension Points
 public protocol DocumentLoader {
+    func supports(_ input: IngestInput) -> Bool
     func load(_ input: IngestInput) throws -> LoadedDocument
 }
 
