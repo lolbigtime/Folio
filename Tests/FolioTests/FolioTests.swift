@@ -1,5 +1,6 @@
 // Tests/FolioTests/FolioSmokeTests.swift
 import XCTest
+import GRDB
 @testable import Folio
 
 final class FolioSmokeTests: XCTestCase {
@@ -80,6 +81,108 @@ final class FolioSmokeTests: XCTestCase {
         XCTAssertLessThanOrEqual(truncated.text.count, 20)
     }
 
+    func testBackfillEmbeddingsMatchesIngestWithPrefix() async throws {
+        struct SingleChunkChunker: Chunker {
+            let text: String
+
+            func chunk(sourceId: String, doc: LoadedDocument, config: ChunkingConfig) throws -> [Chunk] {
+                [Chunk(sourceId: sourceId, page: doc.pages.first?.index, text: text)]
+            }
+        }
+
+        final class RecordingEmbedder: Embedder, @unchecked Sendable {
+            private var lock = NSLock()
+            private(set) var embedCalls: [String] = []
+            private(set) var embedBatchCalls: [[String]] = []
+
+            func embed(_ text: String) throws -> [Float] {
+                lock.lock()
+                embedCalls.append(text)
+                lock.unlock()
+                return Self.vector(for: text)
+            }
+
+            func embedBatch(_ texts: [String]) throws -> [[Float]] {
+                lock.lock()
+                embedBatchCalls.append(texts)
+                lock.unlock()
+                return texts.map(Self.vector(for:))
+            }
+
+            private static func vector(for text: String) -> [Float] {
+                text.unicodeScalars.map { Float($0.value % 97) / 97.0 }
+            }
+        }
+
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("sqlite")
+
+        let embedder = RecordingEmbedder()
+        let chunkBody = "Body paragraph content."
+        let chunker = SingleChunkChunker(text: chunkBody)
+        let engine = try FolioEngine(databaseURL: tmpURL, loaders: [TextDocumentLoader()], chunker: chunker, embedder: embedder)
+
+        var config = FolioConfig()
+        config.indexing.useContextualPrefix = true
+
+        _ = try await engine.ingestAsync(.text("Intro\n\(chunkBody)", name: "Doc.pdf"), sourceId: "Doc1", config: config)
+
+        XCTAssertEqual(embedder.embedCalls.count, 1)
+        guard let ingestText = embedder.embedCalls.first else {
+            XCTFail("Missing ingest embed call")
+            return
+        }
+
+        XCTAssertTrue(ingestText.hasPrefix("[Doc.pdf"))
+        XCTAssertTrue(ingestText.hasSuffix(chunkBody))
+        XCTAssertNotEqual(ingestText, chunkBody)
+
+        let dbQueue = try DatabaseQueue(path: tmpURL.path)
+
+        let stored: (chunkId: String, vector: [Float])? = try dbQueue.read { db in
+            try Row.fetchOne(db, sql: "SELECT chunk_id, vec FROM doc_chunk_vectors LIMIT 1").map { row in
+                let chunkId: String = row["chunk_id"]
+                let data: Data = row["vec"]
+                var array = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
+                _ = array.withUnsafeMutableBytes { data.copyBytes(to: $0) }
+                return (chunkId, array)
+            }
+        }
+
+        guard let initial = stored else {
+            XCTFail("No stored vector found")
+            return
+        }
+
+        try dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM doc_chunk_vectors")
+        }
+
+        try engine.backfillEmbeddings(for: "Doc1")
+
+        XCTAssertEqual(embedder.embedBatchCalls.count, 1)
+        XCTAssertEqual(embedder.embedBatchCalls.first?.first, ingestText)
+
+        let after: (chunkId: String, vector: [Float])? = try dbQueue.read { db in
+            try Row.fetchOne(db, sql: "SELECT chunk_id, vec FROM doc_chunk_vectors LIMIT 1").map { row in
+                let chunkId: String = row["chunk_id"]
+                let data: Data = row["vec"]
+                var array = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
+                _ = array.withUnsafeMutableBytes { data.copyBytes(to: $0) }
+                return (chunkId, array)
+            }
+        }
+
+        guard let reembedded = after else {
+            XCTFail("No vector persisted after backfill")
+            return
+        }
+
+        XCTAssertEqual(reembedded.chunkId, initial.chunkId)
+        XCTAssertEqual(reembedded.vector, initial.vector)
+
+        try? FileManager.default.removeItem(at: tmpURL)
     func testCustomLoaderIsInvokedWhenRegistered() throws {
         final class StubLoader: DocumentLoader {
             var loadCallCount = 0

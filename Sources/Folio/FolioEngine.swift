@@ -291,7 +291,8 @@ public final class FolioEngine {
             let chunks = try store.fetchEmbeddableChunks(for: sourceId, limit: batch)
             if chunks.isEmpty { break }
 
-            let embeddings = try embedder.embedBatch(chunks.map(\.text))
+            let textsToEmbed = chunks.map(\.embeddingText)
+            let embeddings = try embedder.embedBatch(textsToEmbed)
             guard embeddings.count == chunks.count else {
                 throw NSError(domain: "Folio", code: 411, userInfo: [NSLocalizedDescriptionKey: "Embedding count mismatch"])
             }
