@@ -122,5 +122,14 @@ final class FolioSmokeTests: XCTestCase {
 
         let hits = try engine.search("hello", in: "Custom", limit: 1)
         XCTAssertFalse(hits.isEmpty)
+    func testDeleteSourceRemovesSource() throws {
+        let engine = try FolioEngine.inMemory()
+        _ = try engine.ingest(.text("hello world", name: "note.txt"), sourceId: "Doc1")
+
+        XCTAssertEqual(try engine.listSources().count, 1)
+
+        try engine.deleteSource("Doc1")
+
+        XCTAssertTrue(try engine.listSources().isEmpty)
     }
 }
