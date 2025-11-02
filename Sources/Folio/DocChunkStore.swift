@@ -56,6 +56,14 @@ extension DocChunkStore {
         public let sourceId: String
         public let page: Int?
         public let text: String
+        public let prefix: String
+        public let ftsContent: String
+
+        public var embeddingText: String {
+            if !ftsContent.isEmpty { return ftsContent }
+            if prefix.isEmpty { return text }
+            return prefix + text
+        }
     }
 
     public struct ChunkIdentifier: Sendable, Hashable {
@@ -294,8 +302,16 @@ extension DocChunkStore {
         guard limit > 0 else { return [] }
         return try dbQueue.read { db in
             var sql = """
-                SELECT d.rowid, d.id AS chunk_id, d.source_id, d.page, d.content
+                SELECT
+                  d.rowid,
+                  d.id AS chunk_id,
+                  d.source_id,
+                  d.page,
+                  d.content,
+                  COALESCE(d.section_title, '') AS section_title,
+                  f.content AS fts_content
                 FROM doc_chunks AS d
+                JOIN doc_chunks_fts AS f ON f.rowid = d.rowid
                 LEFT JOIN doc_chunk_vectors AS v ON v.chunk_id = d.id
                 WHERE v.chunk_id IS NULL
             """
@@ -316,7 +332,9 @@ extension DocChunkStore {
                     chunkId: row["chunk_id"],
                     sourceId: row["source_id"],
                     page: row["page"],
-                    text: row["content"]
+                    text: row["content"],
+                    prefix: row["section_title"] ?? "",
+                    ftsContent: row["fts_content"] ?? row["content"]
                 )
             }
         }
