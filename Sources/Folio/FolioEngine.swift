@@ -378,7 +378,7 @@ public final class FolioEngine {
     }
     
     public func deleteSource(_ sourceId: String) throws {
-        try store.deleteChunks(forSourceId: sourceId)
+        try store.deleteSource(id: sourceId)
     }
     
     public func listSources() throws -> [Source] {
