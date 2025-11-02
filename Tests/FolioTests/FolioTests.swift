@@ -22,6 +22,22 @@ final class FolioSmokeTests: XCTestCase {
         XCTAssertEqual(text, "multiline\nre-entry")
     }
 
+    func testNormalizeDropsObjectReplacementCharacters() throws {
+        let loader = TextDocumentLoader()
+        let document = try loader.load(.text("\u{FFFC}hello\u{FFFC}", name: "placeholder.pdf"))
+
+        XCTAssertEqual(document.pages.first?.text, "hello")
+    }
+
+    func testNeedsOCRDetectsPlaceholderOnlyText() {
+        XCTAssertTrue(needsOCR(forExtractedText: "\u{FFFC}\u{FFFC}"))
+        XCTAssertTrue(needsOCR(forExtractedText: "   \n\t"))
+        let sparseTable = String(repeating: "|  |  |", count: 40) + "A"
+        XCTAssertTrue(needsOCR(forExtractedText: sparseTable))
+        XCTAssertFalse(needsOCR(forExtractedText: "alpha"))
+        XCTAssertFalse(needsOCR(forExtractedText: "1234"))
+    }
+
     func testFetchDocumentWithAnchorAndLimits() throws {
         struct StubChunker: Chunker {
             func chunk(sourceId: String, doc: LoadedDocument, config: ChunkingConfig) throws -> [Chunk] {
