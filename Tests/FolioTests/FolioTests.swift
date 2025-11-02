@@ -79,4 +79,48 @@ final class FolioSmokeTests: XCTestCase {
         let truncated = try engine.fetchDocument(sourceId: "Doc1", maxChars: 20)
         XCTAssertLessThanOrEqual(truncated.text.count, 20)
     }
+
+    func testCustomLoaderIsInvokedWhenRegistered() throws {
+        final class StubLoader: DocumentLoader {
+            var loadCallCount = 0
+
+            func supports(_ input: IngestInput) -> Bool {
+                if case let .data(_, uti, _) = input {
+                    return uti == "com.example.custom"
+                }
+                return false
+            }
+
+            func load(_ input: IngestInput) throws -> LoadedDocument {
+                loadCallCount += 1
+
+                guard case let .data(data, _, name) = input else {
+                    throw NSError(domain: "Folio", code: 499, userInfo: [NSLocalizedDescriptionKey: "Unsupported input"])
+                }
+
+                let text = String(data: data, encoding: .utf8) ?? ""
+                let page = LoadedPage(index: 0, text: text)
+                return LoadedDocument(name: name ?? "custom", pages: [page])
+            }
+        }
+
+        struct PassthroughChunker: Chunker {
+            func chunk(sourceId: String, doc: LoadedDocument, config: ChunkingConfig) throws -> [Chunk] {
+                doc.pages.map { page in
+                    Chunk(sourceId: sourceId, page: page.index, text: page.text)
+                }
+            }
+        }
+
+        let loader = StubLoader()
+        let engine = try FolioEngine.inMemory(loaders: [loader], chunker: PassthroughChunker())
+        let input = IngestInput.data(Data("hello folio".utf8), uti: "com.example.custom", name: "custom.bin")
+
+        _ = try engine.ingest(input, sourceId: "Custom")
+
+        XCTAssertEqual(loader.loadCallCount, 1)
+
+        let hits = try engine.search("hello", in: "Custom", limit: 1)
+        XCTAssertFalse(hits.isEmpty)
+    }
 }

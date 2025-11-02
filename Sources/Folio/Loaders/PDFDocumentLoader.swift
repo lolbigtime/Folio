@@ -44,6 +44,13 @@ func needsOCR(forExtractedText text: String) -> Bool {
 public struct PDFDocumentLoader: DocumentLoader {
     public init() {}
 
+    public func supports(_ input: IngestInput) -> Bool {
+        if case .pdf = input {
+            return true
+        }
+        return false
+    }
+
     public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .pdf(url) = input, let doc = PDFDocument(url: url) else {
             throw NSError(domain: "Folio", code: 401, userInfo: [NSLocalizedDescriptionKey: "PDF open failed"])
@@ -132,6 +139,13 @@ public struct PDFDocumentLoader: DocumentLoader {
 
 public struct TextDocumentLoader: DocumentLoader {
     public init() {}
+
+    public func supports(_ input: IngestInput) -> Bool {
+        if case .text = input {
+            return true
+        }
+        return false
+    }
 
     public func load(_ input: IngestInput) throws -> LoadedDocument {
         guard case let .text(s, name) = input else {
